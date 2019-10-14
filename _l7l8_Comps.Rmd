@@ -1,0 +1,124 @@
+---
+title: "l7l8_Comparison"
+author: "Simon Topp"
+date: "10/5/2019"
+output: html_document
+editor_options: 
+  chunk_output_type: console
+---
+
+```{r setup, include=FALSE}
+library(tidyverse)
+library(googledrive)
+library(gridExtra)
+knitr::opts_chunk$set(echo = TRUE)
+
+```
+
+```{r Download the data, echo = F, warning=F, message=F, fig.height= 30}
+# files <- drive_ls('ls_compare')
+# 
+# for(i in c(1:length(files$name))){
+#   file <- files$name[i]
+#   path <- paste0('in/l7l8_Comps/',file)
+#   drive_download(as_id(files$id[i]), path, overwrite = T)
+#}
+
+source('0_ModellingFunctions.R')
+files <- list.files('in/l7l8_Comps', full.names = T)
+
+ls78 <- files %>%
+  map_dfr(read.csv, stringsAsFactors = F) %>%
+  filter_if(is.numeric,all_vars(!is.na(.))) %>%
+  filter_at(vars(blue,green,red,nir,swir1,swir2),all_vars(.>0 & .<10000)) %>%
+  as_tibble() %>%
+  rowwise() %>%
+  mutate(hue = rgb2hsv(r=red, g=green, b=blue, maxColorValue = 2000)[1],
+         saturation = rgb2hsv(r=red, g=green, b=blue, maxColorValue = 2000)[2],
+         brightness = rgb2hsv(r=red,g= green, b= blue, maxColorValue = 2000)[3],
+         blue = ifelse(sat == '8',0.8667114*blue + 123.16116, blue),
+         nir = ifelse(sat == '8', 1.01621*nir + 99.28166, nir),
+         red = ifelse(sat == '8', 0.9346232*red + 83.54783, red),
+         green = ifelse(sat == '8', 0.8975912*green + 101.77444, green),
+         NR = nir/red,
+         BR = blue/red,
+         GR = green/red,
+         NR = nir/red,
+         SR = swir1/red,
+         BG = blue/green,
+         BN = blue/nir,
+         BS = blue/swir1,
+         GS = green/swir1,
+         GN = green/nir,
+         fai = nir - (red + (swir1-red)*((830-660)/(1650-660))),
+         ndvi = ((nir-red)/(nir+red)),
+         ndwi = ((green- swir1)/(green + swir1)),
+         fui.hue = fui.hue(red, green, blue))
+
+ls78_long <- ls78 %>%
+  dplyr::select(ID, sat, red, blue, green, nir, swir1, swir2, hue:fui.hue) %>%
+  gather(red:fui.hue, key='band', value='value')  %>%
+  distinct(ID, sat, band, .keep_all = T) %>%
+  mutate(band_sat = paste(band, "_", sat, sep="")) 
+
+ls78_wide <- ls78_long %>%
+  select(-band_sat) %>%
+  mutate(sat = ifelse(sat == 7, 'l7','l8')) %>%
+  group_by(ID) %>%
+  spread(sat, value)
+
+library(plotly)
+ggplotly(ggplot(ls78_wide %>% filter(band == 'fui.hue'), aes(x = l7, y = l8, color = ID)) + geom_point() + geom_abline())
+
+
+
+plotFunc <- function(df, band){
+  ks <- ks.test(df$l7,df$l8)$p.value %>%
+   round(4)
+ 
+ p <- ggplot(df, aes(x = l7, y = l8)) +
+  geom_point() +
+  geom_abline(intercept=0,slope=1, col="red") +
+  ggtitle(paste0(band,' comparison')) +
+  annotate("text", x = -Inf, y = Inf, vjust = 1, hjust = -.5, label = paste0('ks p.value = ', ks))
+ return(p)
+}
+
+plots <- ls78_wide %>%
+  group_by(band) %>%
+  nest() %>%
+  mutate(plots = map2(data, band, plotFunc))
+
+grid.arrange(grobs = plots$plots, ncol = 2, heights = rep(unit(2.5, 'in'),11))
+
+lm <- ls78_wide %>%
+  filter(band %in% c('blue', 'green', 'red', 'nir')) %>%
+  group_by(band) %>%
+  nest() %>%
+  mutate(lm = purrr::map(data, ~lm(l7~l8, data = .)),
+         tidy = purrr::map(lm, broom::tidy)) %>%
+  unnest(tidy) %>%
+  select(band, term, estimate) %>%
+  mutate(term = ifelse(term == "(Intercept)", 'Intercept', term)) %>%
+  spread(term, estimate) 
+
+ls78_wide%>%
+  filter(band %in% c('nir')) %>%
+  mutate(l8cor = 0.8975912*l8 + 101.77444) %>%
+  ggplot(.) +
+  geom_point(aes(x = l8, y = l7, color = 'Original')) +
+  geom_point(aes(x = l8cor, y = l7, color = 'Corrected')) +
+  scale_color_manual(values = c('red','black'))+
+  geom_abline() +
+  ggtitle('Nir Correction')
+
+
+ggplot() + 
+  geom_point(aes(x = l8, y = l7), data = ls78_wide %>% filter(band %in% c('blue', 'green', 'red', 'nir'))) +
+  geom_abline() +
+  geom_abline(data = lm, aes(slope = l8, intercept = Intercept), col = 'red') +
+  facet_wrap(~band) +
+  coord_fixed()
+
+```
+

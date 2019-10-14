@@ -1,0 +1,1520 @@
+---
+title: "7.5_LakeModellingCorrelations"
+author: "Simon Topp"
+date: "4/17/2019"
+output: html_document
+editor_options: 
+  chunk_output_type: console
+---
+
+```{r setup}
+knitr::opts_chunk$set(echo = F)
+knitr::opts_chunk$set(message = F)
+knitr::opts_chunk$set(warning = F)
+knitr::opts_chunk$set(results = 'hide')
+
+library(tidyverse)
+library(feather)
+library(viridis)
+library(knitr)
+library(sf)
+library(magrittr)
+library(rkt)
+library(lubridate)
+library(broom)
+library(furrr)
+library(plotly)
+library(corrgram)
+library(stlplus)
+library(gganimate)
+#library(raster)
+library(rgdal)
+library(gridExtra)
+library(scales)
+library(trend)
+library(kableExtra)
+library(Hmisc)
+```
+
+# This document details the primary results of regionalized bootstrapping for remotely sensed lake water clarity timeseries.
+
+```{r}
+# Bring in all the necessary stoof
+area = 'eco'
+iteration = 'ffs'
+lakeSamp = 'NLA'
+
+if(area == 'eco' & lakeSamp == 'NLA'){
+  region = st_read('in/NLA/NLA_Ecoregions/EcoRegsMerged.shp')
+  Preds.out <- read_feather(paste0('out/TS_Predictions_Inclusive_ST_NLA2012_',area,'.feather')) %>%
+  mutate(date = as.POSIXct(ymd(paste0(year,'-',month,'-01'))))
+  }else if(area == 'eco' & lakeSamp != 'NLA'){
+    region = st_read('in/NLA/NLA_Ecoregions/EcoRegsMerged.shp')
+    Preds.out <- read_feather(paste0('out/TS_Predictions_',iteration,'_',area,'.feather')) %>%
+    mutate(date = as.POSIXct(ymd(paste0(year,'-',month,'-01'))))
+  }else if(area == 'hucs'){
+    region = st_read('in/hucs/hucs.shp') %>%
+            mutate(HUC_2 = factor(as.numeric(HUC_2))) %>%
+            rename(region = REGION) %>%
+            group_by(HUC_2) %>%
+            dplyr::summarize(region = first(region))
+    Preds.out <- read_feather(paste0('out/TS_Predictions_',iteration,'_hucs.feather')) %>%
+    mutate(date = as.POSIXct(ymd(paste0(year,'-',month,'-01'))))
+  }
+```
+
+
+```{r, include = F, eval = F}
+## First, identify months/regions affected by ice cover to remove them from the analysis
+
+## Take a look at when and where lakes are frozen, ice cover dataset comes from 
+# Xiao
+load('../AquaModel/in/monthly_lake_ice_full.Rdata')
+
+## Join with region
+ice.cover <- monthly_lake_ice %>%
+  filter(!is.na(ice_cover_median)) %>%
+  distinct() %>%
+  st_as_sf(coords = c('lon', 'lat'), crs = 4326) %>%
+  st_join(region %>% st_transform(4326))  
+
+# Look at precent of lakes ice covered in a given huc for a given month
+monthly.ice <- ice.cover %>%
+  st_set_geometry(NULL) %>%
+  mutate(ice = ifelse(ice_cover_median > .5, 1, 0)) %>%
+  group_by(region, month) %>%
+  dplyr::summarize(count = n(),
+            p.frozen = sum(ice)/count) %>%
+  right_join(region)
+
+# Spatial distribution of frozen lakes
+#ggplot(monthly.ice) + geom_sf(aes(fill = p.frozen)) +  facet_wrap(~month)
+
+# Graphical dist
+monthly.ice %>%
+  mutate(month = factor(month, levels = c(6:12,1:5))) %>%
+  ggplot(.) + 
+  geom_col(aes(x = month, y = p.frozen, fill = month)) + 
+  geom_hline(yintercept = .3) + 
+  facet_wrap(~region)
+
+#Using 30% of lakes as ice covered as our threshold, get rid of bad months
+num.vis.months <- monthly.ice %>%
+  mutate(iced.free = ifelse(p.frozen > .3, 0, 1)) %>%
+  group_by(region) %>%
+  dplyr::summarize(num.vis = sum(iced.free))
+
+ice.free.months <- monthly.ice %>%
+  filter(p.frozen < .3)  %>%
+  as.data.frame() %>%
+  select(-geometry) %>%
+  left_join(num.vis.months)
+
+write_feather(ice.free.months, paste0('out/', area,'_iceFreeMonths.feather'))
+
+## Look at individual lake basis, here using freeze up as convenient example
+# ice.dist <- ice.cover %>%
+#   mutate(ice = ifelse(ice_cover_median > .5, 1, 0),
+#          ice.month = ifelse(month == 8, 1,
+#     ifelse(month == 9, 2,
+#            ifelse(month == 10, 3,
+#                   ifelse(month == 11, 4,
+#                          ifelse(month == 12, 5,
+#                                 ifelse(month == 1, 6,
+#                                        ifelse(month == 2, 7,
+#                                               ifelse(month == 3, 8,
+#                                                      ifelse(month == 4, 9,
+#                                                             ifelse(month == 5, 10,
+#                                                                    ifelse(month == 6, 11,
+#                                                                           ifelse(month == 7, 12, NA))))))))))))) %>% 
+#   group_by(Hylak_id, ice) %>%
+#   mutate(freeze = month[ice.month == min(ice.month)],
+#          thaw = month[ice.month == max(ice.month)]) %>%
+#   ungroup() %>%
+#   mutate(freeze = ifelse(ice == 1, freeze, NA),
+#          thaw = ifelse(ice == 1, thaw, NA)) %>%
+#   select(Hylak_id, HUC_2, freeze, thaw) %>%
+#   arrange(Hylak_id, freeze, thaw) %>%
+#   distinct(Hylak_id, .keep_all = T)
+
+#ggplot() + geom_sf(data = region) + geom_sf(data = ice.dist, aes(color = freeze), alpha = .4)
+```
+
+
+```{r, include = F, eval = F}
+##Load in the ice data
+ice.free.months <- read_feather(paste0('out/', area,'_iceFreeMonths.feather'))
+
+# Create dummy variable of 1 observation per region per ice free month. This will come into play later on with time series deconvolution.
+dummy <- expand.grid(year = seq(1985,2018), 
+                     month = c(1:12), 
+                     region = unique(region$region),
+                     parameter = c('secchi')) %>% 
+  mutate(iceID = paste0(month,region)) %>%
+  right_join(ice.free.months %>% 
+               select(month,region, num.vis) %>% 
+               mutate(iceID = paste0(month,region)))
+
+## Average lake observations per region/month
+yearly.median <- Preds.out %>%
+  filter(year < 2019) %>%
+  group_by(COMID, year, month, region, parameter) %>%
+  dplyr::summarize(value = median(value, na.rm = T),
+                   count = n()) %>%
+  group_by(year, month, region, parameter) %>%
+  dplyr:: summarise(median = median(value, na.rm = T),
+            sd = sd(value, na.rm =T),
+            count.obs = sum(count),
+            count.lakes = n()) %>%
+  right_join(dummy)%>%
+  filter(parameter == 'secchi') %>%  ## For now, if adding in TSS and Chl then remove this line.
+  arrange(parameter, region, year, month)%>%
+  mutate(date = as.POSIXct(paste0(year,'/',month,'/',01)),
+         count.obs = ifelse(is.na(count.obs), 0, count.obs),
+         count.lakes = ifelse(is.na(count.lakes), 0, count.lakes))
+
+#Make a 3 panel figure for how many lakes we observe each month and the total observations
+
+quantiles <- tibble(quant.label = factor(seq(10,90,10)), 
+                    quants = quantile(yearly.median$count.obs, c(seq(.1,.9,.1))))
+
+p1 <- yearly.median %>%
+  ggplot(., aes(x = count.obs)) +
+  geom_histogram(binwidth = 10, color = 'black') +
+  geom_vline(data = quantiles, aes(color = quant.label, xintercept = quants), size = 1, alpha = .6) +
+  scale_x_continuous(breaks = pretty_breaks(n = 10)) +
+  scale_color_viridis_d()+
+  labs(x = 'Observations per month', color = '10% Quantiles') +
+  theme_bw() +
+  theme(legend.position = 'none')
+
+quantiles <- tibble(quant.label = factor(seq(10,90,10)), 
+                    quants = quantile(yearly.median$count.lakes, c(seq(.1,.9,.1))))
+p2 <- yearly.median %>%
+  ggplot(., aes(x = count.lakes)) +
+  geom_histogram(binwidth = 5, color = 'black', fill = 'grey80') +
+  geom_vline(data = quantiles, aes(color = quant.label, xintercept = quants), size = 1, alpha = .6) +
+  scale_color_viridis_d()+
+  scale_x_continuous(breaks = pretty_breaks(n = 10)) +
+  labs(x = 'Lakes averaged per month', color = '10% Quantiles') +
+  theme_bw() +
+  theme(legend.position = 'bottom')
+
+p3 <- yearly.median %>%
+  filter(!is.na(region)) %>%
+  group_by(region, month) %>%
+  dplyr::summarize(count.obs = mean(count.obs),
+            count.lakes = mean(count.lakes)) %>%
+  ggplot(., aes(x = region, y = count.obs, fill = factor(month))) +
+  geom_col(position = 'dodge') +
+  scale_fill_viridis_d()+
+  labs(x = 'Region', y = 'Average Obs per Month', fill = 'Month') +
+  theme_bw() +
+  theme(legend.position = 'bottom') +
+  guides(fill = guide_legend(nrow = 2))
+
+g <- grid.arrange(p1,p2, p3, nrow = 3, heights = c(.3,.35,.35))
+
+#ggsave(plot = g, 'figures/MonthlyObs3Panel_IceFree.png', width = 7, height = 9, units = 'in')
+
+## Take a look at individual lake ts and regional medians
+ggplot() + 
+  geom_line(data = Preds.out %>% na.omit(.), aes(group = COMID, x = ymd_hms(date), y = value, color = 'Individual Lake'), alpha = .2) + 
+ geom_ribbon(data = yearly.median, aes(x = date, ymin = median - .12, ymax = median + .12, fill = '95% Confidence\nInterval'), alpha = .9) +
+  geom_line(data = yearly.median, aes(x = date, y = median, color = 'Watershed Median')) +
+  labs(x = 'Date', y = 'Water Clarity (m)', title = 'Individual Lake Timeseries', color = 'Time Series', fill = '') +
+  scale_color_manual(values = c('black', 'red')) +
+  scale_fill_manual(values = 'pink') +
+  facet_wrap(~region, scales = 'free') +
+  theme_bw() +
+  theme(legend.position = 'bottom')
+
+#ggsave(paste0('figures/',mod,'_FullTSSE.png'), width =  7, height = 6, units = 'in')
+
+# Quick and dirty look at overall trends
+ggplot(yearly.median, aes(date, y = median, color = region)) + geom_smooth(span = .2, se = F) + labs(title = 'Smoothed SDD Trends By HUC 2') + facet_wrap(~parameter)
+
+```
+
+## To accurately propogate error through our ts deconvolution, we'll apply bootstrap sampling to our ~500 lakes per region over iterations and take the average.
+
+```{r, include = F, eval = F}
+plan(multiprocess(workers = availableCores()-4))
+
+## Use 100 for hucs and 250 for EcoRegs
+stl.boots <- c(1:100) %>% future_map_dfr(., ~bootstrap.stl(.,Preds.out, ice.free.months, NULL))
+
+plan(sequential)
+
+Preds.out %>%
+  filter(!is.na(region)) %>%
+  group_by(region, year) %>%
+  summarise(value = median(value, na.rm = T),
+            count = n()) %>%
+  ggplot(., aes(x = year, y = value)) +
+  geom_smooth(se = F, span = .2) +
+  geom_point() +
+  facet_wrap(~region, scales = 'free') + 
+  ggtitle('Non-Decomposed Yearly Median Values')
+
+#write_feather(stl.boots, paste0('out/stlBootstrapped_',iteration,'_',area,'.feather'))
+```
+
+
+```{r}
+##Load in the ice data
+#ice.free.months <- read_feather(paste0('out/', area,'_iceFreeMonths.feather'))
+
+#stl.boots <- read_feather(paste0('out/stlBootstrapped_',iteration,'_',area,'.feather'))
+
+#Create dummy variable to insert NA's into months removed due to frozen lakes
+dummy <- expand.grid(year = seq(1985,2018), 
+                     month = c(1:12), 
+                     region = unique(region$region),
+                     parameter =c('secchi'))
+
+##Pull out mean, standard dev, and seasonal.amplitude for each huc
+stl.boots.mean.full <- stl.boots %>%
+  group_by(region, date, parameter) %>%
+  dplyr::summarise_at(vars(raw:remainder), .funs = c(mean, sd), na.rm = T) %>%
+  mutate(month = month(date),
+         year = year(date)) %>%
+  rename_at(.vars = vars(ends_with('fn1')), ~sub(pattern = 'fn1', replacement = 'mean', .)) %>%
+  rename_at(.vars = vars(ends_with('fn2')), ~sub(pattern = 'fn2', replacement = 'sd', .)) %>%
+  group_by(year, region) %>%
+  mutate(seas.max = max(seasonal_mean),
+         seas.min = min(seasonal_mean),
+         month.min = month[seasonal_mean == seas.min],
+         month.max = month[seasonal_mean == seas.max]) %>%
+  ungroup() %>%
+  right_join(dummy) %>%
+  left_join(region %>% st_set_geometry(NULL)) %>%
+  arrange(region, year, month) %>%
+  mutate(date = ymd(paste0(year,'-',month,'-01')))
+
+# stl.boots.mean.full %>%
+#   select(region, parameter, trend_mean, date) %>%
+#   mutate(key = paste0(region, parameter)) %>%
+#   spread(key = key, value = trend_mean) %>%
+#   mutate_at(vars("Coastal Plainchl_a":"Xeric Westtss"), scale) %>%
+#   gather("Coastal Plainchl_a":"Xeric Westtss", key = 'Regparameter', value = 'value') %>%
+#     na.omit() %>%
+#   ggplot(., aes(x = date, y = value, color = parameter)) +
+#   geom_line() +
+#   theme_bw() +
+#  facet_wrap(~region, scales = 'free')
+
+## lots going on here, so lets look at 1 parameter at a time
+stl.boots.mean <- stl.boots.mean.full %>%
+  filter(parameter == 'secchi')
+
+## Make a figure showing the 'stability' of each watershed, basically the standard dev of the trend.
+stl.boots.mean %>%
+  ggplot(., aes(x = date, y = trend_mean)) +
+  #geom_line(data = stl.boots, aes(group = factor(iteration)), color = 'grey40') +
+  geom_ribbon(aes(ymin = trend_mean - trend_sd*1, ymax = trend_mean + trend_sd*1 ), color = 'grey60', alpha = .4) +
+  geom_path(color = 'red') +
+  theme_bw() +
+  facet_wrap(~region, scales = 'free') +
+  labs(title = 'Mean and stability across 100 iterations of \nbootstrap sampling per watershed', x = 'Date', y = 'Water Clarity (m)')
+
+#ggsave(paste0('figures/',mod,'_BootstrappedTS.png'), width =  6, height = 5, units = 'in')
+
+## Quickly look at variation in the amplitude of the seasonal signal.
+seasonal.amp <- stl.boots %>%
+  group_by(region, iteration, year, parameter) %>%
+  mutate(seas.max = max(seasonal),
+         seas.min = min(seasonal),
+         seas.amp = seas.max-seas.min) %>%
+  group_by(region, year, parameter) %>%
+  dplyr::summarize_at(vars(seas.min:seas.amp), c(mean, sd), na.rm = T) %>%
+  rename_at(.vars = vars(ends_with('fn1')), ~sub(pattern = 'fn1', replacement = 'mean', .)) %>%
+  rename_at(.vars = vars(ends_with('fn2')), ~sub(pattern = 'fn2', replacement = 'sd', .))
+
+seasonal.amp %>%
+  filter(parameter == 'secchi') %>%
+  ggplot(., aes(x = year, y = seas.amp_mean)) + 
+  geom_ribbon(aes(ymin = seas.amp_mean - seas.amp_sd, ymax = seas.amp_mean + seas.amp_sd), alpha = .4) +
+  geom_line(color = 'red') +
+  facet_wrap(~region, scales = 'free') +
+  labs(title = 'Mean and st. dev aof seasonal \nvariation in clarity for 50 iterations of bootstrap \nsampling per watershed')
+
+check <-  seasonal.amp %>%
+  filter(parameter == 'secchi')%>%
+  group_by(region) %>%
+  nest() %>%
+  mutate(lm = purrr::map(data, ~lm(seas.amp_mean~year, data = .x)),
+         tidy = purrr::map(lm, broom::tidy)) %>%
+  unnest(tidy) %>%
+  filter(term == 'year')
+
+
+## Example of what we get in terms of ts component parts
+region.ex <- region$region[1]
+stl.boots.mean %>%
+  filter(region == region.ex) %>%
+  gather(raw_mean:remainder_mean, key = 'Unit', value = 'Value') %>%
+  mutate(Unit = factor(Unit, levels = c('raw_mean', 'seasonal_mean','trend_mean', 'remainder_mean'))) %>%
+  right_join(expand.grid(year = c(1985:2018), month = c(1:12))) %>% 
+  arrange(Unit, year, month) %>% 
+  ggplot(., aes(x = date, y = Value)) +
+  geom_path() +
+  labs(title = region.ex, x = 'Date', y = 'Clarity Contribution (m)') +
+  facet_wrap(~Unit, scales = 'free', ncol = 1)
+
+#ggsave('figures/SEstl.png', width = 8, height = 5, units = 'in')
+
+
+## Money figure, trends and seasonality across region
+
+#Make a faceted figure (duplicate, just for for now)
+# stl.boots.mean %>%
+#   ggplot(., aes(x = date, y = trend_mean)) +
+#     geom_linerange(aes(x = date, ymin = trend_mean - trend_sd, ymax = trend_mean + trend_sd), color = 'grey70') +
+#     #geom_path(aes(x = date, y= seasonal_mean + trend_mean), color = 'grey50', size = .6) +
+#     geom_path(color = 'red') +
+#     theme_bw() +
+#     facet_wrap(~region, scales = 'free_y') +
+#     labs(y = 'Water Clarity (m)', x = 'Date')
+
+
+# ## Money figure, trends and seasonality across region
+# # Werid hack to get the facets in the correct places.
+# regions <- tibble(region = c(paste0(region$HUC_2,'_',region$region), 
+#                              '5.1_blank','5.2_blank', '7.1_blank', '7.2_blank'),
+#                   hucs = c(region$HUC_2,5.1,5.2,7.1,7.2),
+#                   region = c(as.character(region$region), 
+#                              '5.1_blank','5.2_blank', '7.1_blank', '7.2_blank')) %>%
+#   mutate(region = gsub(x = region, pattern = ' Region', replacement = ''),
+#          region = factor(region, levels = unique(region[order(hucs)]))) %>%
+#   select(-hucs) 
+# 
+# # Make a faceted figure
+# p <- stl.boots.mean %>%
+#   full_join(regions) %>%
+#   ggplot(., aes(x = date, y = trend_mean)) +
+#     geom_linerange(aes(x = date, ymin = trend_mean - trend_sd, ymax = trend_mean + trend_sd), color = 'grey70') +
+#     #geom_path(aes(x = date, y= seasonal_mean + trend_mean), color = 'grey50', size = .6) +
+#     geom_path(color = 'red') +
+#     theme_bw() +
+#     facet_wrap(~region,ncol = 4, scales = 'free_y') + 
+#     labs(y = 'Water Clarity (m)', x = 'Date') +
+#     theme(axis.text.x = element_text(hjust = .75),
+#           strip.text = element_text(colour = 'white'))
+# 
+# g <- ggplot_gtable(ggplot_build(p))
+# strip_both <- which(grepl('strip-', g$layout$name))
+# 
+# fills <- c(colors$fill[c(16,17,18,13:15,9:12,7)],'white','white',
+#            colors$fill[c(8,5)],'white','white', colors$fill[c(6,1:4)])
+# k <- 1
+# for (i in strip_both[c(1,2,5:24)]) {
+# j <- which(grepl('rect', g$grobs[[i]]$grobs[[1]]$childrenOrder))
+# g$grobs[[i]]$grobs[[1]]$children[[j]]$gp$fill <- fills[k]
+# k <- k+1
+# }
+# grid.draw(g)
+
+#ggsave('figures/hucTrends18panel.png', plot = g, width = 7.25, height = 8, units = 'in', dpi = 300)
+
+
+## Bring the above together with the map, really just not working. Doin it in illustrator.
+# ggdraw() +
+#   draw_plot(p, width = 1, height = .9) +
+#   draw_plot(lmMap, x = .3, y = .5, width = .5, height = .5)
+
+```
+
+## Run some regressions to see type of average change per year we get
+
+```{r}
+# Start with ManKendall, pretty sure I'll just use logistic regression, but worth checking
+# a non-parametric approach
+mkTrend <- stl.boots.mean%>%
+  ungroup() %>%
+  select(region, trend_mean, date) %>%
+  arrange(region, date) %>%
+  na.omit() %>%
+  group_by(region) %>%
+  nest() %>%
+  mutate(mk = purrr::map(data, ~sens.slope(.$trend_mean)),
+         slope = purrr::map_dbl(mk, 'estimates'),
+         slope = slope*100,
+         p.value = purrr::map_dbl(mk, 'p.value')) %>%
+  select(-c(data,mk)) %>%
+  mutate(sig = ifelse(p.value < 0.05, 'yes', NA)) %>%
+  left_join(region)
+
+mkTrend %>%
+  rowwise() %>%
+  mutate(coords.x = st_centroid(geometry)[1],
+    coords.y = st_centroid(geometry)[2]) %>%
+  ungroup() %>%
+  ggplot() +
+    geom_sf(aes(fill = slope, color = sig)) +
+    geom_text(aes(x = coords.x, y = coords.y, label = region), color = 'white') +
+    theme(axis.text.x = element_blank(),
+          axis.text.y = element_blank(),
+          axis.ticks = element_blank(),
+          rect = element_blank(),
+          panel.grid.major = element_line(color = 'transparent'),
+          legend.position = 'bottom') +
+    scale_color_manual(values = 'red', breaks = 'yes') +
+    scale_fill_viridis_c(option = 'cividis') +
+    labs(fill = 'Slope (cm/year)', color = 'P.Value < 0.05', title = 'MannKendall Slopes') +
+    guides(color = guide_legend(label = F))
+
+# Linear approach
+#Average change per year
+lmUS <- stl.boots.mean %>%
+  mutate(date = as.Date(date)) %>%
+  group_by(date) %>%
+  dplyr::summarize(trend = mean(trend_mean)) %>%
+  lm(trend ~ date, data = .) %>%
+  tidy() %>%
+  mutate(estimate = estimate*365*100, 
+         std.error = std.error*365*100)
+
+## By region
+lmTrend <- stl.boots.mean %>%
+  ungroup() %>%
+  mutate(date = as.Date(date)) %>%
+  select(region, trend_mean, date) %>%
+  arrange(region, date) %>%
+  na.omit() %>%
+  group_by(region) %>%
+  nest() %>%
+  mutate(lm = purrr::map(data, ~lm(trend_mean ~ date, data = .)),
+         summ = purrr::map(lm, broom::glance),
+         lm.summ = purrr::map(data, ~lm(trend_mean ~ date, data = .) %>%
+                           tidy() %>%
+                           dplyr::select(term,estimate) %>%
+                           spread(term, estimate) %>%
+                           rename_all(~ c("intc", 'coef')))) %>%
+  unnest(summ) %>%
+  unnest(lm.summ) %>%
+  mutate(slope.cmyr = coef*365*100,
+         sig = ifelse(p.value < 0.05, 'yes', NA)) %>%
+  left_join(region)
+
+# 
+# plots <- purrr::map(lmTrend$lm, effect_plot, pred = date, plot.points = T)
+# ggarrange(plotlist = plots)
+# rm(plots)
+
+lm.summ <- lmTrend %>%
+  select(region, lm) %>%
+  mutate(summ = purrr::map(lm, tidy)) %>%
+  unnest(summ) %>%
+  #filter(term == 'date') %>%
+  arrange(estimate) %>%
+  mutate(estimate = estimate*365*100,
+         std.error = std.error*365100,
+         ci = 1.96*std.error)
+
+
+#Between watershed stability correlations
+stability <- stl.boots.mean %>%
+  as.data.frame() %>%
+  group_by(region) %>%
+  dplyr::summarize_at(vars(seasonal_mean:trend_sd), mean, na.rm = T) %>%
+  column_to_rownames('region') %>%
+  as.matrix() %>%
+  rcorr(.)
+
+#Overall stability correlations
+stability <- stl.boots.mean %>%
+  as.data.frame() %>%
+  select(raw_mean:trend_sd) %>%
+  na.omit() %>%
+  #column_to_rownames('region') %>%
+  as.matrix() %>%
+  rcorr(.)
+
+# Mean stability
+check <- stl.boots.mean %>% group_by(region) %>% dplyr::summarise(sd = mean(trend_sd, na.rm = T)) %>% arrange(sd)
+
+#mean(check$sd)
+
+check <- stl.boots.mean %>% group_by(region, year) %>% 
+  dplyr::summarise(sd.trend = mean(trend_sd, na.rm = T),
+                   sd.seas = mean(seasonal_sd, na.rm = T)) %>%
+  gather(sd.trend:sd.seas, key = 'sd', value = 'value')
+
+#ggplot(check %>% filter(sd == 'sd.trend'), aes(x = year, y = value, color = region)) + geom_line()
+
+
+cor(lm.summ$estimate[lm.summ$term == "date"],lm.summ$estimate[lm.summ$term == "(Intercept)"])
+lm.summ %>%
+  kable(.) %>%
+  kable_styling(.)
+
+lmTrend %>%
+  rowwise() %>%
+  mutate(coords.x = st_centroid(geometry)[1],
+    coords.y = st_centroid(geometry)[2]) %>%
+  ungroup() %>%
+  #arrange(as.numeric(HUC_2)) %>%
+  ggplot() +
+    geom_sf(aes(fill = slope.cmyr, color = sig)) +
+    geom_text(aes(x = coords.x, y = coords.y, label = region), color = 'white') +
+    theme(axis.text.x = element_blank(),
+          axis.text.y = element_blank(),
+          axis.ticks = element_blank(),
+          axis.title = element_blank(),
+          rect = element_blank(),
+          panel.grid.major = element_line(color = 'transparent'),
+          legend.position = 'bottom') +
+    scale_color_manual(values = '#ff726f', breaks = 'yes') +
+    scale_fill_viridis_c(option = 'cividis') +
+    labs(fill = 'Mean Slope\n(cm/year)', color = 'P.Value < 0.05', title = 'Linear Regression Slopes') +
+    guides(color = guide_legend(label = F), fill = guide_colorbar(title.hjust = .5))
+
+ggsave(paste0('figures/', mod,'_lmMap.png'), width = 4, height = 5, dpi = 300) 
+
+# g <- ggplot_build(lmMap)
+# colors = g$data[[1]]["fill"]
+
+```
+
+## Make some gifs
+
+```{r, eval = F}
+#Select area
+subset <- "Western Mountains"
+
+##Make TS image
+## Single watersheds
+stl.boots.mean %>% filter(region == subset) %>%
+  select(seasonal = seasonal_mean, Trend = trend_mean, seasonal_sd, date) %>%
+  mutate(Seasonal = Trend + seasonal) %>%
+  gather(Trend, Seasonal, key = 'Signal', value = 'Value') %>%
+  #arrange(Signal, date) %>%
+  ggplot(., aes(x = date, y = Value, color = Signal, size = Signal, group = Signal)) +
+  geom_path() +
+  scale_color_manual(values = c('grey60', 'red')) +
+  scale_size_manual(values = c(.7,1)) +
+  theme_bw() +
+  labs(y = 'Water Clarity (m)', x = 'Date', title = subset) +
+  theme(plot.caption = element_text(hjust = .7, size = 7.5))
+
+ggsave(paste0('figures/',subset,'.png'), width = 4, height = 2.5, units = 'in')
+
+#Make Static seasonal image
+stl.boots.mean %>% 
+  filter(region == subset, 
+         year == 1985,
+         !is.na(seasonal_mean)) %>%
+  ggplot(., aes(x = month, y = seasonal_mean)) +
+    geom_smooth(se = F, span = .4, aes(color = 'Seasonal Pattern')) +
+    #geom_ribbon(aes(ymin = seasonal_mean -2*seasonal_sd, ymax = seasonal_mean+2*seasonal_sd), alpha = .3)+
+    geom_point(aes(x = month.min, y = min(seasonal_mean)-max(seasonal_sd), color= 'Minimum Clarity'), size = 2) +
+    geom_point(aes(x = month.max, y = min(seasonal_mean)-max(seasonal_sd), color = 'Maximum Clarity'), size = 2) +
+    scale_color_manual(values = c('blue', 'brown', 'black')) + 
+    scale_x_continuous(breaks = c(1:12), labels = c(1:12)) +
+    #theme(legend.position = 'none') +
+    labs(x = 'Month', y = 'Seasonal Clarity Signal (m)', color = '')+
+    theme(legend.position = 'bottom') +
+    ggtitle(subset, 'Year: 1985')
+
+#ggsave(paste0('figures/',region,'_static.png'), width = 3.5, height = 3.5, units = 'in')
+
+p <- stl.boots.mean %>% 
+  filter(region == subset, 
+         !is.na(seasonal_mean)) %>%
+  ggplot(., aes(x = month, y = seasonal_mean)) +
+    geom_smooth(se = F, span = .4, aes(color = 'Seasonal Pattern')) +
+    #geom_ribbon(aes(ymin = seasonal_mean -2*seasonal_sd, ymax = seasonal_mean+2*seasonal_sd), alpha = .3)+
+    geom_point(aes(x = month.max, y = min(seasonal_mean)-max(seasonal_sd), color = 'Minimum Clarity'), size = 2) +
+    geom_point(aes(x = month.min, y = min(seasonal_mean)-max(seasonal_sd), color= 'Maximum Clarity'), size = 2) +
+    scale_color_manual(values = c('blue', 'brown', 'black')) + 
+    scale_x_continuous(breaks = c(1:12), labels = c(1:12)) +
+    #theme(legend.position = 'none') +
+    labs(x = 'Month', y = 'Seasonal Clarity Signal (m)', color = '')+
+    theme(legend.position = 'bottom') +
+  transition_states(year, transition_length = .5, state_length = 1) +
+  ggtitle(subset, 'Year: {closest_state}')
+
+
+pgif <- animate(p, width = 3.5, height = 3.5, units = 'in', res = 250)
+
+grid.arrange(p1, rasterGrob(pgif), bottom = 'Trends and seasonality of lake water clarity in the Tennessee Region HUC 2 watershed')
+
+anim_save(paste0('figures/',subset,'.gif'))
+
+#Combine into 1 image.
+a_mgif <- image_read('figures/Tennessee Region.png')
+b_mgif <- image_read(pgif)
+
+new_gif <- image_append(c(a_mgif, b_mgif[1]))
+for(i in 1:35){
+  combined <- image_append(c(a_mgif, b_mgif[i]))
+  new_gif <- c(new_gif, combined)
+}
+
+image_write_gif(new_gif,'figures/test.gif')
+
+image_read(new_gif)
+
+colors <- tibble(colors = viridis(18))
+
+
+```
+
+## Static Seasonal Figs
+
+```{r}
+# Static image for publication
+## make new data from for min max values
+seas.min.max <- stl.boots.mean %>%
+  filter(!is.na(trend_mean)) %>%
+  group_by(region, year) %>%
+  dplyr::summarize(month.min = first(month.min),
+            month.max = first(month.max)) %>%
+  gather(month.max, month.min, key = 'MinMax', value = 'Month') %>%
+  group_by(region, MinMax, Month) %>%
+  dplyr::summarize(count = n(),
+                   year = round(mean(year))) %>%
+  left_join(stl.boots.mean %>%
+              filter(!is.na(trend_mean)) %>%
+                       group_by(region) %>%
+              dplyr::summarize(minVal = min(seasonal_mean) -.08)) %>%
+  left_join(region)
+
+stl.boots.mean %>% 
+  left_join(region) %>%
+  ggplot(., aes(x = month, y = seasonal_mean, color = year)) +
+  # geom_ribbon(aes(ymin = seasonal_mean -2*seasonal_sd, 
+  #                 ymax = seasonal_mean+2*seasonal_sd), alpha = .1)+
+  geom_smooth(se = F, span = .4, aes(group = year)) +
+  scale_color_viridis_c(direction = -1) +
+  #geom_point(aes(x = Month, y = minVal, shape = MinMax, size = count), data = seas.min.max) +
+    scale_x_continuous(breaks = c(1:12), labels = c('J','F','M',"A","M","J","J","A","S","O","N","D")) +
+    labs(y = 'Water Clarity Variation (m)', x = 'Month', color = 'Year',
+         title = 'Seasonal variation in clarity over time') +
+   theme(legend.position = 'bottom') +
+  guides(shape = guide_legend(title = NULL)) +
+  facet_wrap(~region, scales = 'free_y', ncol = 3) 
+
+ggsave('figures/seasonal_static.png', width = 6, height = 5, units = 'in')
+
+
+## Function for pulling legend out of a single plot
+# get_legend<-function(myggplot){
+#   tmp <- ggplot_gtable(ggplot_build(myggplot))
+#   leg <- which(sapply(tmp$grobs, function(x) x$name) == "guide-box")
+#   legend <- tmp$grobs[[leg]]
+#   return(legend)
+# }
+#ggsave('figures/SeasonalStatic.png', width = 7.25, height = 5, units = 'in')
+
+
+# Finally, look at how min and max months have changed.
+stl.boots.mean %>%
+  filter(!is.na(trend_mean)) %>%
+  group_by(region, year) %>%
+  dplyr::summarize(month.min = first(month.min),
+            month.max = first(month.max)) %>%
+  gather(month.max, month.min, key = 'MinMax', value = 'Month') %>%
+  group_by(region, MinMax, Month) %>%
+  ggplot(., aes(x = year, y = Month, color = MinMax)) + geom_line() + geom_point()+ facet_wrap(~region)
+
+check <- seas.min.max %>% group_by(region, MinMax) %>%
+  dplyr::summarize(mean.month = mean(Month, na.rm = T),
+            sd.month = sd(Month, na.rm = T))
+sd(seas.min.max$Month[seas.min.max$MinMax == 'month.min'])
+
+check %>% group_by(MinMax) %>%
+  dplyr::summarize(mean.month = mean(mean.month, na.rm = T),
+            sd.month = sd(sd.month, na.rm = T))
+
+stl.boots.mean %>%
+  filter(!is.na(trend_mean)) %>%
+  group_by(region, year) %>%
+  dplyr::summarize(month.min = first(month.min),
+            month.max = first(month.max)) %>%
+  gather(month.max, month.min, key = 'MinMax', value = 'Month') %>%
+  # group_by(region, MinMax) %>%
+  # dplyr::summarize(month.mean = mean(Month),
+  #                  month.median = median(Month)) %>%
+  ggplot(., aes(y = Month, x = year, group = year)) + geom_boxplot() +
+  scale_y_continuous(breaks = c(1,3,5,7,9,11), labels = c('Jan','Mar',"May","Jul","Sep","Nov")) +
+  theme_bw() + 
+  theme(axis.text.x = element_text(hjust = 1),
+        axis.text = element_text(size = 10)) +
+  facet_wrap(~MinMax, nrow = 2) + 
+  labs(x = 'Year', title = 'Distribution of maximum and minimum clarity months')
+
+#ggsave('figures/MinMaxDistributions.png', height = 2.5, width = 7.25)
+
+check <- stl.boots.mean %>%
+  filter(!is.na(trend_mean)) %>%
+  group_by(region, year) %>%
+  dplyr::summarize(month.min = first(month.min),
+            month.max = first(month.max)) %>%
+  mutate(period = ifelse(year < 2001, 1,2))
+
+t.test(check$month.min[check$period == 1], check$month.min[check$period == 2])
+t.test(check$month.max[check$period == 1], check$month.max[check$period == 2])
+
+```
+
+
+## Take a look at correlations with NADP and PRISM data
+
+```{r, include = F, eval = F}
+#Unzip and join all the prism data
+## Pull in PRISM data (originally downloaded through the PRISM ftp)
+##Everything is zipped, which is super annoying
+dezip <- function(path, var){
+  files <- list.files(path, pattern = '*.zip', full.names = T)
+  purrr::map(files, unzip, exdir = 'D:/PRISM_MeanTemp/unzipped')
+  }
+
+#Unzip files to local paths
+paths <- list.dirs('D:/PRISM_Precip', recursive = F)
+purrr::map(paths, dezip)
+
+paths <- list.dirs('D:/PRISM_MeanTemp', recursive = F)
+purrr::map(paths, dezip)
+
+## Reproject and simplify regions to match PRISM raster files for the spatial join
+regionNAD83 <- region %>% 
+  st_simplify(., dTolerance = 15000) %>%
+  st_transform(., 4269)
+
+ggplot(regionNAD83) + geom_sf(aes(fill = region))
+
+geo <- regionNAD83
+raster.path <- pathTemps[1]
+## Make function for pulling out summary mean values per HUC_2
+getMeans <- function(raster.path, geo){
+  geo <- as(geo, "Spatial")
+  image <- raster(raster.path)
+  name <- image@data@names
+  yearmonth <- str_split(name, pattern = '_')[[1]][5]
+  year = substr(yearmonth,1,4)
+  month = substr(yearmonth,5,6)
+  means <- extract(image, geo, fun = mean, na.rm = T, sp = T)
+  means <- means@data
+  colnames(means)[3] <- 'value'
+  means$year = year
+  means$month = month
+  return(means)
+}
+
+library(raster)
+## It's pretty slow, so lets try to put it all in parrallel
+pathTemps <- list.files('D:/PRISM_MeanTemp/unzipped', pattern = '[0-9]{6}_bil.bil$', full.names = T)
+pathPrecip <- list.files('D:/PRISM_Precip/unzipped', pattern = '[0-9]{6}_bil.bil$', full.names = T)
+plan(multiprocess(workers = availableCores()-4))
+
+prismTemps <- pathTemps %>%
+  future_map_dfr(getMeans, geo = regionNAD83, .progress = T)
+
+prismPrecip <- pathPrecip %>%
+  future_map_dfr(getMeans, geo = regionNAD83, .progress = T)
+
+plan(sequential)
+
+write_feather(prismTemps, paste0('out/PRISMTemp_',area,'.feather'))
+write_feather(prismPrecip, paste0('out/PRISMPrecip_',area,'.feather'))
+
+#raster and furrr randomly don't play well together sometimes.  If the above fails go the slow way.
+
+prismTemps <- pathTemps %>%
+  map_dfr(getMeans, geo = regionNAD83)
+
+prismPrecip <- pathPrecip %>%
+  map_dfr(getMeans, geo = regionNAD83)
+
+# Detach raster package because it doesn't play nice with dplyr
+detach("package:raster", unload = TRUE)
+```
+
+
+```{r, include = F, eval = F}
+prismTemps <- read_feather(paste0('out/PRISMTemp_',area,'.feather')) %>%
+  rename_all(tolower)
+prismPrecip <- read_feather(paste0('out/PRISMPrecip_',area,'.feather')) %>%
+  rename_all(tolower)
+
+
+## Pull in the NADP Data
+nadp.sites <- read.csv('../aquaModel/in/NADP/siteList.csv') %>%
+  filter(!is.na(lat)) %>%
+  st_as_sf(coords = c('long','lat'), crs = 4326) %>%
+  st_transform(.,st_crs(region)) %>%
+  st_join(region)
+
+#ggplot(nadp.sites) +  geom_sf(data =usa) + geom_sf()
+
+nadp.monthly <- read.csv('../aquaModel/in/NADP/NTN-All-m.csv') %>%
+  left_join(nadp.sites, by = 'SiteID') %>%
+  rename(year = yr) %>%
+  select(-c(Criteria1:Criteria3, fullChemLab, svol, ppt, daysSample, elev)) %>%
+  group_by(region, year, month) %>%
+  dplyr::summarize_if(is.numeric, median, na.rm = T)
+
+
+##Teleconnection Indexes
+tc <- read.csv('../aquaModel/in/IsoPdo.csv') %>%
+  mutate(year = as.numeric(substr(YrMonth, 1,4)),
+         month = as.numeric(substr(YrMonth, 5,6)))
+
+
+## Make a master dataset of all the stl, nadp, and prism data.
+stl.full <- stl.boots.mean %>%
+  left_join(nadp.monthly) %>%
+  left_join(prismTemps %>% rename(Temp = value) %>%
+              left_join(prismPrecip %>% rename(Precip = value)) %>%
+              mutate_at(vars(year:month), as.numeric)) %>%
+  left_join(tc) %>%
+  mutate(date = as.POSIXct(paste0(year,'/',month,'/',01)))
+
+write_feather(stl.full, paste0('out/stlFullDataSecchi_',area,'.feather'))
+```
+
+
+```{r}
+stl.full <- read_feather(paste0('out/stlFullDataSecchi_',area,'.feather'))
+
+# Just take a look at the data a little  
+# p <- stl.full %>%
+#   select(region, date, trend_mean, pH, raw_mean) %>%
+#   gather(trend_mean:raw_mean, key = 'metric', value = 'value') %>%
+#   ggplot(., aes(x = date, y = value, color = metric)) + 
+#   geom_line(alpha = .3) +
+#   geom_smooth(se = F, span = .3) +
+#   facet_wrap(~region, scales = 'free')
+# 
+# ggplotly(p)
+
+#Look at overall correlation
+corr.t <- stl.full %>%
+  filter(!is.na(trend_mean)) %>%
+  select(region, raw_mean, remainder_mean, trend_mean, seasonal_mean, NH4, NO3, SO4, pH, PDO, PNA, NAO, Precip, Temp) %>%
+  gather(NH4:Temp, key = 'Metric', value = 'Conc') %>%
+  group_by(region, Metric) %>%
+  nest() %>%
+  mutate(cors = purrr::map(data, ~cor.test(x = .x$trend_mean, y = .x$Conc)),
+         cor = purrr::map(cors, 'estimate'),
+         cor = purrr::map_dbl(cor, 'cor'),
+         p.value = purrr::map_dbl(cors, 'p.value')) %>%
+  select(-c(data, cors))%>%
+  mutate_at(vars(cor:p.value), round, digits =3) %>%
+  mutate(sig = ifelse(p.value < .05, 'yes', NA),
+         Metric = factor(Metric, levels = c('Temp', 'Precip', 'NO3', 'NH4', 'SO4', 'pH', 'PNA', 'PDO', 'NAO')),
+         signal = 'Trend')
+
+corr.r <- stl.full %>%
+  filter(!is.na(trend_mean)) %>%
+  select(region, raw_mean, remainder_mean, trend_mean, seasonal_mean, NH4, NO3, SO4, pH, PDO, PNA, NAO, Precip, Temp) %>%
+  gather(NH4:Temp, key = 'Metric', value = 'Conc') %>%
+  group_by(region, Metric) %>%
+  nest() %>%
+  mutate(cors = purrr::map(data, ~cor.test(x = .x$remainder_mean, y = .x$Conc)),
+         cor = purrr::map(cors, 'estimate'),
+         cor = purrr::map_dbl(cor, 'cor'),
+         p.value = purrr::map_dbl(cors, 'p.value')) %>%
+  select(-c(data, cors))%>%
+  mutate_at(vars(cor:p.value), round, digits =3) %>%
+  mutate(sig = ifelse(p.value < .05, 'yes', NA),
+         Metric = factor(Metric, levels = c('Temp', 'Precip', 'NO3', 'NH4', 'SO4', 'pH', 'PNA', 'PDO', 'NAO')),
+         signal = 'Remainder')
+
+corr.full <- stl.full %>%
+  filter(!is.na(trend_mean)) %>%
+  select(region, raw_mean, remainder_mean, trend_mean, seasonal_mean, NH4, NO3, SO4, pH, PDO, PNA, NAO, Precip, Temp) %>%
+  gather(NH4:Temp, key = 'Metric', value = 'Conc') %>%
+  group_by(region, Metric) %>%
+  nest() %>%
+  mutate(cors = purrr::map(data, ~cor.test(x = .x$seasonal_mean, y = .x$Conc)),
+         cor = purrr::map(cors, 'estimate'),
+         cor = purrr::map_dbl(cor, 'cor'),
+         p.value = purrr::map_dbl(cors, 'p.value')) %>%
+  select(-c(data, cors))%>%
+  mutate_at(vars(cor:p.value), round, digits =3) %>%
+  mutate(sig = ifelse(p.value < .05, 'yes', NA),
+         Metric = factor(Metric, levels = c('Temp', 'Precip', 'NO3', 'NH4', 'SO4', 'pH', 'PNA', 'PDO', 'NAO')),
+         signal = 'Seasonal') %>%
+  bind_rows(corr.t) %>%
+  bind_rows(corr.r) %>%
+  right_join(region)
+
+corr.full %>%
+  filter(Metric %in% c('SO4', 'Temp', 'Precip', 'PDO')) %>%
+  st_as_sf() %>%
+  st_simplify(., dTolerance = 1000) %>%
+  ggplot(.) +  geom_sf(aes(fill = cor, color = sig)) + 
+  facet_grid(signal~Metric) + 
+  scale_fill_gradient2(low = 'red', high = 'blue', mid = 'grey', midpoint = 0) +
+  scale_color_manual(values = 'black', na.translate = F) +
+  theme(axis.text.x = element_blank(),
+        axis.text.y = element_blank(),
+        axis.ticks = element_blank(),
+        #rect = element_blank(),
+        legend.position = 'bottom') +
+  labs(fill = 'Correlation\nCoefficient', color = 'P.Value < 0.05',
+       title = 'Potential Correlates with Seasonality and Overall Trend') +
+  guides(color = guide_legend(label = F))
+
+ggsave(paste0('figures/',mod,'RegionalCorrelates.png'), height = 7, width = 7.5, units = 'in')
+
+## Plotly code for zooming in and looking at the data
+# stl.full %>%
+#   select(region, date, raw_mean, remainder_mean, trend_mean, seasonal_mean, NH4, SO4, pH, PDO, Precip, Temp) %>% #, NAO, PNA, NO3,) %>%
+#   group_by(region) %>%
+#   mutate_at(vars(raw_mean:Temp), scale) %>%
+#   ungroup() %>%
+#   gather(pH, NH4, SO4, key = 'Metric', value = 'Conc') %>%
+#   ggplot(., aes(x = date)) +
+#   #geom_line(aes(y = Conc, color = Metric)) +
+#   geom_smooth(aes(y = Conc, color = Metric), size = .4, span = .1, se = F) +
+#   geom_line(aes(y = trend_mean, linetype = 'Trend'), color = "red", size = 1) +
+#   guides(linetype = guide_legend(title = '')) +
+#   #geom_smooth(span = .2, se = F) + 
+#   facet_wrap(~region, scales = 'free')
+
+## Summary fig for Anadarko
+national.median <- stl.full %>%
+  group_by(date) %>%
+  dplyr::summarize_at(vars(seasonal_mean:remainder_mean, seas.max,seas.min), mean, na.rm =T) %>%
+  mutate(seas.mag = seas.max - seas.min)
+
+stl.full %>%
+  arrange(region, year, month) %>%
+  left_join(region) %>%
+  ggplot(., aes(x = date, y = trend_mean)) +
+  geom_path(aes(group = region, color = region), alpha = .7) +
+  scale_color_viridis_d() +
+  #geom_line(data = national.median, aes(x = date, y = trend_mean, linetype = 'Median'), size = .9) +
+  geom_vline(xintercept = as.POSIXct(c("2007-01-01", "2012-01-01",'2017-01-01')), color = 'blue') +
+  geom_text(aes(x = as.POSIXct("2000-01-01"), y = 4.5, label = 'NLA Sample Points'), color = 'blue') +
+  theme_bw() +
+  labs(y = 'Water Clarity (m)', x = 'Date', title = 'Regional Trends') +
+  theme(legend.position = 'bottom',
+        legend.text = element_text(size = 8)) +
+  guides(color = guide_legend(ncol = 4, title = NULL))
+
+#ggsave('figures/huc2trends.png', width = 7, height = 5, units = 'in')
+
+```
+
+## What was previously a quick comparison to in situ values and seems to be growing.
+
+```{r}
+
+##First we do the exact same decomposition using all the field measurements we have from wqp and lagos, regardless of sattellite coincidence.  
+# We add the additional step of averaging per lake before per month because sampling is really uneven. 
+# Load in lagos and wqp data
+sites <- read_feather('../Aquasat/2_rsdata/out/unique_site_inventory.feather')
+
+wqp.lagos <- read_feather('../Aquasat/1_wqdata/out/wqp_lagos_unity.feather') %>%
+  dplyr::select(SiteID,date_unity, source, value = secchi) %>%
+  na.omit() %>%
+  filter(value > 0.01, 
+         value < 60) %>%
+  left_join(sites) %>%
+  filter(!is.na(lat)) %>%
+  mutate(year = year(date_unity),
+         month = month(date_unity)) %>%
+  group_by(year, month, SiteID, lat, long) %>%
+  dplyr::summarize(median = median(value),
+            count = n())
+
+dummy <- expand.grid(year = seq(1985,2018), 
+                     month = c(1:12), 
+                     region = unique(region$region)) %>% 
+  mutate(iceID = paste0(month,region)) %>%
+  right_join(ice.free.months %>% 
+               select(month,region, num.vis) %>% 
+               mutate(iceID = paste0(month,region)))
+
+fieldmedian <- wqp.lagos %>%
+  filter(year > 1983, year < 2019) %>%
+  st_as_sf(.,coords = c('long', 'lat'), crs = 4326) %>%
+  st_transform(., st_crs(region))%>%
+  st_join(region) %>%
+  st_set_geometry(NULL) %>%
+  group_by(year, month, region) %>%
+  dplyr::summarize(median = median(median, na.rm = T),
+            sd = sd(median, na.rm =T),
+            count.obs = sum(count),
+            count.sites = n()) %>%
+  right_join(dummy) %>%
+  arrange(region ,year, month)%>%
+  mutate(date = as.POSIXct(paste0(year,'/',month,'/',01)))
+
+ggplot(fieldmedian, aes(date, y = median, color = region)) + geom_smooth(span = .2, se = F) + labs(title = 'Smoothed SDD Trends By HUC 2')
+
+stlField <- fieldmedian %>%
+  #filter(region != 'Northern Appalachians') %>%
+  group_by(region) %>%
+  nest() %>%
+  mutate(stl = purrr::map(data, ~stlplus(x = .$median, t = .$date, n.p = .$num.vis[1], s.window = 25, sub.labels = c(1:.$num.vis[1]))),
+         date = purrr::map(stl, 'time'),
+         stl = purrr::map(stl, 'data')) %>%
+  select(-data) %>%
+  unnest() %>%
+  mutate(year = year(date)) %>%
+  group_by(year, region) %>%
+  mutate(seas.max = max(seasonal),
+         seas.min = min(seasonal),
+         seas.mag = seas.max-seas.min) %>%
+  ungroup() %>%
+  left_join(region)
+
+dummy <- expand.grid(year = seq(1984,2018), 
+                     month = c(1:12), 
+                     region = unique(region$region))
+
+## Compare RS and in situ decompositions
+stl.boots.mean %>% mutate(source = 'Remote.Sensing') %>%
+  rename(trend = trend_mean) %>%
+  mutate(date = as.POSIXct(date)) %>%
+  bind_rows(stlField %>% 
+              mutate(source = 'In.Situ') %>%
+              right_join(dummy)) %>%
+  filter(!is.na(source),
+         year > 1985, year < 2018)%>%
+  #filter(region %in% c('Great Lakes Region', 'Atlantic Gulf Region', 'New England Region', 'Pacific Northwest Region', 'Upper Colorado Region')) %>%
+  ggplot(., aes(x = date, y = trend, color = source)) +
+  geom_line() + 
+  facet_wrap(~region, scales = 'free_y', ncol = 3) +
+  theme_bw() + 
+  theme(legend.position = 'bottom') +
+  labs(title = 'Remote Sensing vs. Field Decompositions', color = 'Source', x = 'Date', y = 'Water Clarity (m)')
+
+ggsave(paste0('figures/',mod,'InSituVsRsFull.png'), height = 6, width = 6.5, units = 'in')
+
+dummy <- expand.grid(year = seq(1985,2018), month = c(1:12), region = factor(unique(region$region)))
+
+fieldmatch <- output.full %>%
+  filter(year < 2019,
+         !is.na(region)) %>%
+  rename(RS = Predicted, Field = Actual) %>%
+  gather(RS,Field, key = 'Measure', value = 'value') %>%
+  group_by(year, SiteID, Measure, month, region) %>%
+  summarise(median = median(value, na.rm = T)) %>%
+  group_by(year, Measure, month, region) %>%
+  summarise(median = median(median, na.rm = T)) %>%
+  right_join(dummy)%>%
+  arrange(region,year, month)%>%
+  mutate(date = as.POSIXct(paste0(year,'/',month,'/',01)))
+
+ggplot(fieldmatch %>% na.omit() %>%filter(year>1985,year <2018), aes(date, y = median, color = Measure)) +
+  #geom_point(alpha = .1) +
+  geom_smooth(method = 'loess', span = .2, se = F, size = .75) +
+  facet_wrap(~region, scales = 'free', ncol = 3) +
+  labs(title = 'Coincident Validation Field and RS Observations') +
+  theme_bw() +
+  theme(legend.position = 'bottom')
+
+df.full.encoded <- sr.sf %>%
+  filter(parameter == i,
+         !is.na(region),
+         value <= 15) %>%
+  mutate(value = log(value)) %>%
+  as.data.frame() %>%
+  select(-geometry)
+
+df.full.encoded <- predict(oneHot, df.full.encoded %>% select(one_of(features))) %>%
+  as.data.frame(.) %>% 
+  select(inputs)
+
+sr.preds <- sr.sf %>%
+  filter(parameter == i,
+         !is.na(region),
+         value <= 15) %>%
+  mutate(value = log(value)) %>%
+  as.data.frame() %>%
+  select(date, region, Field = value, SiteID, year, month) %>%
+  mutate(RS = exp(predict(model, df.full.encoded)),
+         Field = exp(Field))
+
+sr.preds %>% filter(year < 2019,
+         !is.na(region)) %>%
+  gather(RS,Field, key = 'Measure', value = 'value') %>%
+  group_by(year, SiteID, Measure, month, region) %>%
+  summarise(median = median(value, na.rm = T)) %>%
+  group_by(year, Measure, month, region) %>%
+  summarise(median = median(median, na.rm = T)) %>%
+  right_join(dummy)%>%
+  arrange(region,year, month)%>%
+  mutate(date = as.POSIXct(paste0(year,'/',month,'/',01))) %>%
+  na.omit() %>%
+  #filter(year>1985, year < 2018) %>%
+  ggplot(., aes(date, y = median, color = Measure)) +
+  #geom_point(alpha = .1) +
+  geom_smooth(method = 'loess', span = .2, se = F, size = .75) +
+  facet_wrap(~region, scales = 'free', ncol = 3) +
+  labs(title = 'Coincident Field and RS Observations') +
+  theme_bw() +
+  theme(legend.position = 'bottom')
+
+ggsave(paste0('figures/',mod,'InSituVsRsCoincident.png'), height = 6, width = 6.5, units = 'in')
+
+# ## Bring the two together into a figure
+# get_legend<-function(myggplot){
+#   tmp <- ggplot_gtable(ggplot_build(myggplot + theme(legend.position = 'bottom',
+#                                                      legend.background = element_rect(color = 'grey70'))))
+#   leg <- which(sapply(tmp$grobs, function(x) x$name) == "guide-box")
+#   legend <- tmp$grobs[[leg]]
+#   return(legend)
+# }
+# 
+# p2 <- matchfieldmedian %>%
+#   select(date, median, region, region, Measure) %>%
+#   na.omit()%>%
+#   filter(region %in% c('4_Great Lakes', '3_South Atlantic-Gulf', '5_Ohio', '17_Pacific Northwest', '14_Upper Colorado', '10_Missouri')) %>%
+# ggplot(., aes(date, y = median, color = Measure)) + 
+#   #geom_point(alpha = .1) +
+#   geom_smooth(method = 'loess', span = .2, se = F, size = .5) + 
+#   facet_grid(region~., scales = 'free_y') +
+#   #labs(title = 'Coincident Subsample Comparison') +
+#   theme_bw() +
+#   theme(#strip.background = element_blank(),
+#         #strip.text.x = element_blank(),
+#         axis.title = element_blank(),
+#         legend.position = 'none',
+#         axis.text.x = element_text(hjust = .75))
+# 
+# p1 <- stl.boots.mean %>% mutate(Data.Source = 'Remote.Sensing') %>%
+#   rename(trend = trend_mean) %>%
+#   left_join(regions) %>%
+#   bind_rows(stlField %>% mutate(Data.Source = 'In.Situ')) %>%
+#   filter(region %in% c('4_Great Lakes', '3_South Atlantic-Gulf', '5_Ohio', '17_Pacific Northwest', '14_Upper Colorado', '10_Missouri')) %>%
+#   ggplot(., aes(x = date, y = trend, color = Data.Source)) +
+#   geom_path(size = .5) + 
+#   facet_wrap(~region, scales = 'free_y', ncol = 1) +
+#   #labs(title = 'Full Field Sample Comparison') +
+#   theme_bw() +
+#   theme(strip.background = element_blank(),
+#         strip.text.x = element_blank(),
+#         axis.title = element_blank(),
+#         legend.position = 'none',
+#         axis.text.x = element_text(hjust = .75))
+# 
+# c1lab <- textGrob('Full Field Sample\nComparison')
+# c2lab <- textGrob('Coincident Subsample\nComparison')
+# 
+# leg <- get_legend(p1)
+# 
+# g <- grid.arrange(p1,p2, c1lab, c2lab, leg,
+#                   layout_matrix = rbind(c(5,5),
+#                                         c(3,4),
+#                                         c(1,2)),
+#                   bottom = 'Date',
+#                   left = 'Water Clarity (m)',
+#                   heights = c(.5,.5,6))
+# 
+# ggsave('figures/RSFieldComp.png', plot = g,width = 4, height = 8, units = 'in')
+
+```
+
+
+## Take a look at auto-correlations
+
+```{r, include = F, eval = F}
+acf <- stl.boots.mean %>%
+  group_by(region) %>%
+  nest() %>%
+  mutate(acf = purrr::map(data, ~acf(.$raw, lag.max = 360, na.action = na.pass)),
+         lag = purrr::map(acf, 'lag'),
+         acf = purrr::map(acf, 'acf')) %>%
+  select(-data) %>%
+  unnest() %>%
+  mutate(lag = lag/12 + 1984)
+
+ggplot(acf, aes(x = lag, y = acf)) + geom_col() + facet_wrap(~region, scales = 'free')
+
+## Look at how the different regions are correlated to each other
+cor <- stl.boots.mean %>%
+  select(region, trend, date) %>%
+  spread(region, trend) %>%
+  select(-date) %>%
+  corrgram(., order = T, upper.panel=panel.conf)
+
+
+## Look at lagged cross correlations
+ccf <- stl.full %>%
+  select(region, trend, seasonal, NH4, NO3, SO4, pH, PDO, ISO, Precip, Temp) %>%
+  gather(NH4:Temp, key = 'Metric', value = 'Conc') %>%
+  group_by(region, Metric) %>%
+  nest() %>%
+  mutate(ccf = purrr::map(data, ~ccf(.x$seasonal, .x$Conc, lag.max = 36, na.action = na.pass, plot = F)),
+         lag = purrr::map(ccf, 'lag'),
+         ccf = purrr::map(ccf, 'acf')) %>%
+  select(-data) %>%
+  unnest() %>%
+  mutate(lag = lag/12)
+
+ggplot(ccf %>% filter(Metric == 'Precip'), aes(x = lag, y = ccf)) + geom_line() + facet_wrap(region~Metric, scales = 'free') + geom_hline(yintercept = -.3, color = 'blue', alpha = .4)
+
+```
+
+## Test with ~469 lakes in HUC 7, Upper Mississippi
+
+```{r, include = F, eval = F}
+yearly.nest <- Preds.out %>%
+  mutate(date = as.POSIXct(paste0(year,'/',month,'/',01)))
+
+dummy <- expand.grid(year = seq(1984,2018), month = c(1:12), samp = factor(c(100,200,300,400,463)))
+
+samps <- tibble(COMID = sample(unique(yearly.nest$COMID), 100), samp = 100) %>%
+  bind_rows(tibble(COMID = sample(unique(yearly.nest$COMID), 200), samp = 200)) %>%
+  bind_rows(tibble(COMID = sample(unique(yearly.nest$COMID), 300), samp = 300)) %>%
+  bind_rows(tibble(COMID = sample(unique(yearly.nest$COMID), 400), samp = 400)) %>%
+  bind_rows(tibble(COMID = unique(yearly.nest$COMID), samp = 463))
+
+yearly.median <- Preds.out %>%
+  inner_join(samps %>% mutate(samp = factor(samp))) %>%
+  filter(year < 2019) %>%
+  group_by(year, month, samp, season) %>%
+  dplyr::summarizemedian = median(value, na.rm = T),
+            sd = sd(value, na.rm =T),
+            count = n()) %>%
+  right_join(dummy)%>%
+  mutate(date = as.POSIXct(paste0(year,'/',month,'/',01))) %>%
+  arrange(samp, date)
+
+ggplot() + 
+  geom_line(data = yearly.nest %>% filter(region == '3'), aes(group = COMID, x = date, y = value, color = 'Individual Lake'), alpha = .2) + 
+ geom_ribbon(data = yearly.median %>% filter(region == '3'), aes(x = date, ymin = median - .12, ymax = median + .12, fill = '95% Confidence\nInterval'), alpha = .9) +
+  geom_line(data = yearly.median %>% filter(region == '3'), aes(x = date, y = median, color = 'Watershed Median')) +
+  labs(x = 'Date', y = 'Water Clarity (m)', title = 'Individual Lake Timeseries', color = 'Time Series', fill = '') +
+  scale_color_manual(values = c('black', 'red')) +
+  scale_fill_manual(values = 'pink') +
+  theme_bw()
+
+stl <- yearly.median %>%
+  group_by(samp) %>%
+  nest() %>%
+  mutate(stl = purrr::map(data, ~stlplus(x = .$median, t = .$date, n.p = 12, s.window = 25, sub.labels = c(1:12))),
+         date = purrr::map(stl, 'time'),
+         stl = purrr::map(stl, 'data')) %>%
+  select(-data) %>%
+  unnest() %>%
+  mutate(year = year(date)) %>%
+  group_by(year, samp) %>%
+  mutate(seas.max = max(seasonal),
+         seas.min = min(seasonal),
+         seas.mag = seas.max-seas.min) %>%
+  ungroup()
+
+stl %>%
+  gather(raw:remainder, key = 'Component', value = 'Value') %>%
+  ggplot(., aes(date, Value, color = samp)) +
+  geom_line() +
+  labs(title = 'Decomposition Comparison by Sample size', color = 'Sample\nSize') +
+  facet_wrap(~Component, scales = 'free')
+
+stl %>%
+  gather(raw:remainder, key = 'Component', value = 'Value') %>%
+  ggplot(.) +
+  geom_freqpoly(aes(x = Value, y =stat(density), color = samp)) +
+  labs(title = 'Decomposition Comparison by Sample size', color = 'Sample\nSize') +
+  facet_wrap(~Component, scales = 'free')
+
+stl %>%
+  gather(raw:remainder, key = 'Component', value = 'Value') %>%
+  ggplot(.) +
+  geom_violin(aes(x = samp, y = Value), draw_quantiles = c(.25,.5,.75)) +
+  labs(title = 'Decomposition Comparison by Sample size', x = 'Sample Size') +
+  facet_wrap(~Component, scales = 'free')
+
+```
+
+## Cluster analysis
+```{r, include = F, eval = F}
+library(dtwclust)
+
+##Check how many lakes we have lots of obs for
+counts <- Preds.out %>% 
+  group_by(COMID, year, month) %>%
+  summarise(count = n()) %>%
+  group_by(COMID) %>%
+  summarise(count = n())
+
+
+t.matrix <- huc2.full %>% select(region, date, trend_mean) %>% filter(!is.na(trend_mean)) %>% spread(key = date, value = trend_mean) %>% as.data.frame() %>% set_rownames(.,levels(huc2.full$region)) %>% select(-region) %>% t() %>% na.omit() %>% t()
+
+pc_t <- tsclust(t.matrix, k = 3,
+distance = "dtw_basic", centroid = "mean",
+seed = 94L)
+cvi(pc_t, type = 'internal')
+
+s.matrix <- huc2.full %>% select(region, date, seasonal_mean) %>% filter(!is.na(seasonal_mean)) %>% spread(key = date, value = seasonal_mean) %>% as.data.frame() %>% set_rownames(.,levels(huc2.full$region)) %>% select(-region) %>% t() %>% na.omit() %>% t()
+
+pc_s <- tsclust(s.matrix, k = 3,
+distance = "dtw_basic", centroid = "mean",
+seed = 94L)
+cvi(pc_s, type = 'internal')
+
+r.matrix <- huc2.full %>% select(region, date, raw_mean) %>% filter(!is.na(raw_mean)) %>% spread(key = date, value = raw_mean) %>% as.data.frame() %>% set_rownames(.,levels(huc2.full$region)) %>% select(-region) %>% t() %>% na.omit() %>% t()
+
+pc_r <- tsclust(r.matrix, k = 3,
+distance = "dtw_basic", centroid = "mean",
+seed = 94L)
+cvi(pc_r, type = 'internal')
+
+clusters <- tibble(region = row.names(t.matrix), tClust = pc_t@cluster, sClust = pc_s@cluster, rClust = pc_r@cluster)
+
+check <- clusters %>%
+  gather(tClust:rClust, key = 'Component', value = 'Cluster') %>%
+  left_join(region)
+
+
+p <- ggplot(check %>% mutate(Cluster = factor(Cluster))) +
+  geom_sf(aes(fill = Cluster)) + 
+  theme_bw() +
+  theme(axis.text.x = element_blank(),
+        axis.text.y = element_blank(),
+        axis.ticks = element_blank(),
+        #rect = element_blank(),
+        legend.position = 'bottom') +
+  facet_wrap(~Component)
+
+#ggsave(p, file = 'figures/ClusterAnalysis.png', width = 7, height = 4, units = 'in')
+
+
+huc2.full <- huc2.full %>% left_join(clusters)
+
+p1 <- huc2.full %>%
+  ggplot(aes(x = date, y = trend_mean, color = region, group = region)) + 
+  geom_ribbon(aes(ymin = trend_mean - trend_sd, ymax = trend_mean + trend_sd), fill = 'grey90', color = 'grey90') +
+  geom_line() + 
+  scale_color_viridis_d() +
+  theme_bw() +
+  theme(legend.position = 'none') +
+  facet_wrap(~tClust, nrow = 2, scales = 'free')
+
+p1
+
+grid.arrange(grobs = list(clustTrends, hucSamples), nrow = 2)
+
+## Code for comparing n clusters
+# pc_k <- tsclust(s.matrix, k = 3:6,
+# distance = "dtw_basic", centroid = "mean",
+# seed = 94L)
+# names(pc_k) <- paste0("k_", 3L:6L)
+# sapply(pc_k, cvi, type = "internal")
+```
+
+## PCA to look at similarities
+```{r, include = F, eval = F}
+library(factoextra)
+library(FactoMineR)
+
+t.pca <- huc2.full %>% 
+  select(region, date, trend_mean) %>%
+  mutate(year = year(date)) %>%
+  group_by(year, region) %>%
+  dplyr::summarize(trend = mean(trend_mean, na.rm = T)) %>%
+  group_by(region) %>%
+  mutate(trend = scale(trend)) %>%
+  ungroup() %>%
+  spread(key = year, value = trend) %>%
+  #arrange(year) %>%
+  column_to_rownames(.,'region')#%>%
+  #as.data.frame() %>%
+  #select(-year) %>%
+  svd()
+
+write.csv(t.pca, 'out/TedData.csv')
+fviz_eig(t.pca)
+
+fviz_pca_var(t.pca,
+             col.var = "contrib", # Color by contributions to the PC
+             gradient.cols = c("#00AFBB", "#E7B800", "#FC4E07"),
+             repel = TRUE     # Avoid text overlapping
+             )
+
+fviz_pca_ind(t.pca,
+             col.ind = "cos2", # Color by the quality of representation
+             gradient.cols = c("#00AFBB", "#E7B800", "#FC4E07"),
+             repel = TRUE     # Avoid text overlapping
+             )
+
+fviz_pca_biplot(t.pca, repel = TRUE,
+                col.var = "#2E9FDF", # Variables color
+                col.ind = "#696969"  # Individuals color
+                )
+
+
+t.pca$var$coord
+
+```
+
+NLA Comparison
+
+```{r}
+nla.2007 <- read.csv('in/NLA/nla2007_secchi_20091008.txt', stringsAsFactors = F) %>%
+  select(SITE_ID, secchi = SECMEAN, date = DATE_SECCHI) %>%
+  left_join(read.csv('in/NLA/nla2007_sampledlakeinformation_20091113.txt') %>%
+              select(SITE_ID, COMID = COM_ID, region = WSA_ECO9, 
+                     lat = LAT_DD, long = LON_DD))
+
+nla.2012 <- read.csv('in/NLA/nla2012_secchi_08232016.txt', stringsAsFactors = F) %>%
+  select(SITE_ID, secchi = SECCHI, date = DATE_COL) %>%
+  left_join(read.csv('in/NLA/nla2012_wide_siteinfo_08232016.txt') %>%
+              select(SITE_ID, COMID = COMID2012, region = AGGR_ECO9_2015, 
+                     lat = LAT_DD83, long = LON_DD83))
+
+nlaFull <- nla.2007 %>%
+  mutate(nla.year = 2007) %>%
+  bind_rows(nla.2012 %>% mutate(nla.year = 2012)) %>%
+  mutate(date = mdy(date),
+         year = year(date),
+         month = month(date),
+         region = factor(region, 
+                         labels = c("Coastal Plain", "Northern Appalachians", "Northern Plains", "Southern Appalachians", "Southern Plains", "Temperate Planes", "Upper Midwest","Western Mountains","Xeric West"))) %>%
+  group_by(SITE_ID, region, nla.year) %>%
+  summarise(secchi = median(secchi, na.rm = T)) %>%
+  group_by(region, nla.year) %>%
+  rename(year = nla.year) %>%
+  summarise(secchi.mean = mean(secchi, na.rm = T),
+            secchi.median = median(secchi, na.rm = T),
+            secchi.sd = sd(secchi, na.rm =T)) %>%
+  mutate(source = 'NLA')
+
+predComp <- Preds.out %>% filter(year %in% c(2007,2012),
+                                 month %in% c(5:9)) %>%
+  group_by(region, year) %>%
+  summarise(secchi.mean = mean(value, na.rm = T),
+            secchi.median = median(value, na.rm = T),
+            secchi.sd = sd(value, na.rm =T)) %>%
+  mutate(source = 'RS') %>%
+  bind_rows(nlaFull)
+
+ggplot(predComp, aes(x = region, color = source)) +
+  geom_point(aes(y = secchi.mean)) +
+  geom_errorbar(aes(ymin = secchi.mean - secchi.sd, ymax = secchi.mean + secchi.sd)) +
+  scale_color_viridis_d(end = .6) +
+  facet_wrap(~year) +
+  theme_bw() +
+  theme(axis.text.x = element_text(angle = 90, hjust = 1)) +
+  labs(x = 'Region', y = 'Water Clarity (m)', title = 'Comparison of NLA to Remotely Sensed Predictions')
+
+
+predComp <- Preds.out %>% filter(year %in% c(2007,2012),
+                                 month %in% c(5:9)) %>%
+  select(region, secchi = value, year) %>%
+  mutate(source = 'RS') %>%
+  bind_rows(nla.2007 %>% select(region, secchi) %>%
+              mutate(source = 'NLA', year = 2007)) %>%
+  bind_rows(nla.2012 %>% select(region, secchi) %>%
+              mutate(source = 'NLA', year = 2012))
+
+ggplot(predComp, aes(x = region, y = secchi, color = source)) + 
+  geom_violin()  + 
+  scale_color_viridis_d(end = .6) +
+  scale_y_continuous(limits = c(0,10)) +
+  facet_wrap(~year, ncol = 2) +
+  theme_bw() +
+  theme(axis.text.x = element_text(angle = 90, hjust = 1))
+        
+        
+```
+

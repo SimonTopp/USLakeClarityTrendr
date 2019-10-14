@@ -1,0 +1,263 @@
+---
+title: "4_LakeModelling"
+author: "Simon Topp"
+date: "9/11/2018"
+output: html_document
+editor_options: 
+  chunk_output_type: console
+---
+
+```{r setup, eval = F}
+library(googledrive)
+library(tidyverse)
+library(feather)
+library(viridis)
+library(knitr)
+library(sf)
+library(rgdal)
+library(maps)
+library(magrittr)
+library(rkt)
+library(xgboost)
+library(lubridate)
+library(hydrolinks)
+library(lubridate)
+library(onehot)
+library(broom)
+library(furrr)
+library(plotly)
+library(corrgram)
+library(stlplus)
+library(gganimate)
+```
+
+
+
+```{r download, eval = F}
+# Bring in all the necessary stoof
+area = 'eco'
+iteration = 'ffs'
+lakeSamp = 'random'
+
+
+## Read in lakes sent up to EE
+if(area == 'eco' & lakeSamp == 'NLA'){
+  lakes.up <- read_feather('out/lakesNLA2012.feather')
+  lakesDown <- list.files('lake_data/NLA2012', full.names = T)
+}else if(area == 'eco' & lakeSamp != 'NLA'){  
+  lakes.up <- read_feather('out/lakesEcoReg500.feather')
+  lakesDown <- list.files('lake_data/EcoReg500', full.names = T) 
+}else{
+  lakes.up <- read_feather('out/lakesHUC2_200_out.feather') %>%
+    rename(COMID = comid,
+           region = REGION)
+  lakesDown <- list.files('lake_data/HUC2_200', full.names = T)
+  }
+
+
+#lakesDown <- paste0(getwd(), '/lake_data_HUC2/', files$name)
+
+## Extract vector of empty files' names
+empties <- lakesDown[file.info(lakesDown)[["size"]]==1]
+lakesDown <- lakesDown[!lakesDown %in% empties]
+```
+
+## Run each lake/parameter combination through the modelling pipeline to create timeseries of predictions.
+
+```{r}
+
+#filesUp <- paste0('lake_data/EcoReg500',lakes.up$COMID,'.csv')
+
+#lakesDown <- lakesDown[lakesDown %in% filesUp]
+
+# Load in lakeCat data
+lc.files <- list.files('in/lakeCat/unzip', full.names = T)
+
+# Join lakes to nhd plus LakeCat data
+for(i in lc.files){
+  if(i == first(lc.files)){
+    lc <- read.csv(i) %>% mutate(COMID = factor(COMID))
+    lake.join <- lakes.up  %>%
+      left_join(lc , by = 'COMID')
+    }else{
+    lc <- read.csv(i) %>% mutate(COMID = factor(COMID))%>%
+      select(-c(CatAreaSqKm, WsAreaSqKm, CatPctFull,WsPctFull,inStreamCat))
+    lake.join <- lake.join %>%
+      left_join(lc, by = 'COMID')}
+}
+
+dummy <- expand.grid(COMID = unique(lakes.up$COMID), period = c(1,2))
+
+names.in <- names(lake.join)
+
+## Remove unwanted parameters and munge a couple of date related ones.
+lake.join <- lake.join %>%
+  filter(!is.na(CatAreaSqKm)) %>% #Two lakes missing from LakeCat for some reason
+  select(-c(grep(names.in, pattern = '*Ws', value = T))) %>%
+  left_join(dummy) %>%
+  mutate(COMID = as.factor(COMID),
+         PctImp = ifelse(period == 1, PctImp2006Cat, PctImp2011Cat),
+         PctOw =ifelse(period == 1, PctOw2006Cat, PctOw2011Cat),
+         PctIce = ifelse(period == 1, PctIce2006Cat, PctImp2011Cat),
+         PctUrbOp = ifelse(period == 1, PctUrbOp2006Cat, PctUrbOp2011Cat),
+         PctUrbLo = ifelse(period == 1, PctUrbLo2006Cat, PctUrbLo2011Cat),
+         PctUrbMd = ifelse(period == 1, PctUrbMd2006Cat, PctUrbMd2011Cat),
+         PctUrbHi = ifelse(period == 1, PctUrbHi2006Cat, PctUrbHi2011Cat),
+         PctBl = ifelse(period == 1, PctBl2006Cat, PctBl2011Cat),
+         PctDecid = ifelse(period == 1, PctDecid2006Cat, PctDecid2011Cat),
+         PctConif = ifelse(period == 1, PctConif2006Cat, PctConif2011Cat),
+         PctMxFst = ifelse(period == 1, PctMxFst2006Cat, PctMxFst2011Cat),
+         PctShrb = ifelse(period == 1, PctShrb2006Cat, PctShrb2011Cat),
+         PctGrs = ifelse(period == 1, PctGrs2006Cat, PctGrs2011Cat),
+         PctHay = ifelse(period == 1, PctHay2006Cat, PctHay2011Cat),
+         PctCrop = ifelse(period == 1, PctCrop2006Cat, PctCrop2011Cat),
+         PctWdWet = ifelse(period == 1, PctWdWet2006Cat, PctWdWet2011Cat),
+         PctHbWet = ifelse(period == 1, PctHbWet2006Cat, PctHbWet2011Cat),
+         inStreamCat = factor(inStreamCat)) %>%
+    rowwise() %>%
+    mutate(meanFrstLoss = mean(c(PctFrstLoss2001Cat:PctFrstLoss2013Cat), na.rm = T),
+           meanFrstFire = mean(c(PctFire2000Cat:PctFire2010Cat, na.rm = T))) %>%
+    ungroup() %>%
+  select(-c(PctFire2000Cat:PctFrstLoss2013Cat, PctImp2006Cat, PctImp2011Cat, PctOw2006Cat:PctHbWet2011Cat, Precip08Cat:Tmean09Cat)) 
+
+#Round the majority of values to the nearest 
+round10 <- names(lake.join %>% select(c(vol_total, depth_avg, dis_avg, res_time, slope_100, wshd_area, CatAreaSqKm, PctAg2006Slp20Cat:CompStrgthCat, PctCarbResidCat:PctWaterCat, NABD_NIDStorCat:WetIndexCat, PctImp:meanFrstFire)))
+
+#Round a subset to the nearest 10th because their values more or less range from 0 to 1.
+round.1 <- names(lake.join %>% select(c(lake_area, shore_len, shore_dev, AgKffactCat, KffactCat, MineDensCat, NABD_DensCat)))
+
+lake.join <- lake.join %>%
+  mutate_at(round10, round, digits = -1) %>%
+  mutate_at(round.1, round, digits = 1) %>%
+  mutate(slope_100 = ifelse(slope_100 == -1, -9999, slope_100)) #make consistent no data value
+         
+
+if(area == 'eco' & lakeSamp != 'NLA'){
+  write_feather(lake.join, 'out/EcoReg500LakesFull.feather')
+}else if(area == 'eco' & lakeSamp == 'NLA'){
+  write_feather(lake.join, 'out/NLA2012LakesFull.feather')
+}else{
+  write_feather(lake.join, 'out/Huc2_200LakesFull.feather')
+}
+
+#lake.join <- read_feather('out/EcoReg500LakesFull.feather')
+## Make look up table for AOD values
+aodLUT <- function(path){
+    df <- read.csv(path, stringsAsFactors = F) %>%
+      mutate(COMID = as.character(COMID),
+             year = year(date)) %>%
+      filter(!is.na(blue)) %>%
+      inner_join(lake.join %>% mutate(COMID = as.character(COMID)), by = c('COMID')) %>%
+      distinct(system.index, date, .keep_all = T)
+      
+      lut <- df %>%
+        select(COMID, date, lat = pour_lat, long = pour_long) %>%
+        rowwise() %>%
+        mutate(AOD = ifelse(ymd_hms(date) > ymd('2019/07/30'),
+                            NA, pullMerra(date = date, lat = lat, long = long))) %>%
+        ungroup()
+  return(lut)
+}
+
+cl <- makePSOCKcluster(availableCores() - 4)
+plan(multiprocess)
+lut <- lakesDown %>% future_map_dfr(aodLUT, .progress = T)
+plan(sequential)
+stopCluster(cl)
+
+write_feather(lut, 'out/aodLUT_NLA2012.feather')
+
+```
+
+
+```{r}
+if(area == 'eco' & lakeSamp != 'NLA'){
+  lake.join <- read_feather('out/EcoReg500LakesFull.feather')
+}else if(area == 'eco' & lakeSamp == 'NLA'){
+  lake.join <- read_feather('out/NLA2012LakesFull.feather')
+}else{
+  lake.join <- read_feather('out/Huc2_200LakesFull.feather')
+}
+
+## Bring in all the files needed in the script
+# Landscape variables ranked by RF feature importance
+rfeVars <- read_feather('out/RfeVariablesFull.feather')
+ffsVariables <- read_feather('out/ffsVariablesFull.feather')
+## Test the old model
+#rfeVars <- read_feather('../aquaModel/out/dsweStrict2_100Full_rrFalse_RfeVariables.feather')
+
+#Evaluation Sites
+sites.eval <- read_feather('out/evalSites.feather')
+
+#Pull in munged match up data
+srMunged <- read_feather('out/srMunged.feather') %>%
+  mutate(uniqueID = row_number(),
+         siteParam = paste0(COMID, parameter)) %>%
+  filter(!COMID %in% sites.eval$COMID)
+
+# Set the arguments
+#dsweStrict_100FullWinSD
+iteration = 'ffs'
+numAdd = -9999
+cons <- c('secchi', 'tss', 'chl_a')
+inputs <- c(str_split(ffsVariables$var, ', ')[[1]])
+log = 'ln'
+filter <- T
+weight <- F
+ungroup <- T
+area = 'eco'
+e = environment()
+load('models/ffs_ln_secchi.Rdata')
+
+source('0_ModellingFunctions.R')
+
+if(area == 'eco'){
+  ids <-list.files('lake_data/EcoReg500') %>% strsplit(split = '.csv', fixed = T) %>% unlist()
+  }else{ids <- list.files('lake_data/HUC2_200') %>%strsplit(split = '.csv', fixed = T) %>% unlist()
+  ids <- ids[ids %in% lake.join$COMID]
+  }
+
+#ids <- unique(as.character(lake.join$COMID))[] 
+
+plan(multiprocess(workers = availableCores()-4))
+
+Preds.out <-  ids %>% future_map_dfr(~EvalPreds(id = .,paths = lakesDown, sites.eval = lake.join, param = 'secchi', log = log, eval = F, version = 'new', model = xgb_model$finalModel, features = inputs ))
+  #bind_rows(ids %>% future_map_dfr(~EvalPreds(.,lakesDown, lake.join, 'tss', log, eval = F, version = 'new'))) %>%
+  #bind_rows(ids %>% future_map_dfr(~EvalPreds(.,lakesDown, lake.join, 'chl_a', log, eval = F, version = 'new')))
+
+plan(sequential)
+
+write_feather(Preds.out, paste0('out/TS_Predictions_',iteration,'_',area,'.feather'))
+#Preds.out <- read_feather(paste0('out/TS_Predictions_',iteration,'.feather'))
+```
+
+
+## Explore the data a bit.
+
+```{r}
+if(area == 'eco'){
+  region = st_read('in/NLA/NLA_Ecoregions/EcoRegsMerged.shp')
+}else if(area == 'hucs'){
+  region = st_read('in/hucs/hucs.shp') %>%
+          mutate(HUC_2 = factor(as.numeric(HUC_2))) %>%
+          group_by(HUC_2) %>%
+          summarize(region = first(REGION))
+}
+
+## Take a quick look at mean trends in each HUC2
+Preds.out%>%
+  na.omit() %>%
+  group_by(year, region, parameter) %>%
+  summarise(value = mean(value)) %>%
+  ggplot(., aes(x = year, y = value, color = region)) +
+  geom_smooth(se = F, span = .1) +
+  #geom_point() +
+  labs(y = 'SDD (m)', title = 'SDD by HUC2 over time') +
+  facet_wrap(~parameter, scales = 'free')
+
+check <- read.csv(list.files('lake_data/EcoReg500', full.names = T)[1])
+head(check)
+
+
+```
+

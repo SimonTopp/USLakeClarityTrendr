@@ -1,0 +1,229 @@
+---
+title: "3_LakeExport"
+author: "Simon Topp"
+date: "9/10/2018"
+output: html_document
+editor_options: 
+  chunk_output_type: console
+---
+#Pull surface reflectance values for sample of nhd lakes
+
+This script pulls down all the cloud free reflectance data available for a ranomd sample of 1000 nhd lakes.
+
+```{r setup, include=FALSE}
+library(tidyverse)
+library(feather)
+library(reticulate)
+library(googledrive)
+library(sf)
+library(mapview)
+library(hydrolinks)
+library(furrr)
+```
+
+
+
+```{r}
+## Load in nhd lake data downlowded from, http://www.horizon-systems.com/NHDPlus/V2NationalData.php
+nhdLakes <- st_read('D:/GIS_Data/NHD/nhdPlusV2_WaterBodiesFull.shp') %>%
+  filter(FTYPE == 'LakePond' | FTYPE == 'Reservoir',
+         AREASQKM >= .01, ##Make sure they're landsat visible
+         AREASQKM < 4000)  ##Exclude the Great lakes
+
+## Load in our region variable
+region = st_read('in/NLA/NLA_Ecoregions/EcoRegsMerged.shp') %>%
+  st_simplify(preserveTopology = T, dTolerance = 100) %>%
+  st_transform(.,st_crs(nhdLakes))
+
+plan(multiprocess)
+centerJoin <- nhdLakes %>%
+  st_centroid() %>% 
+  split(., c(1:10)) %>%
+  future_map_dfr(~st_join(.,region, join = st_nearest_feature), .progress = T)
+plan(sequential)
+
+nhd.join <- nhdLakes %>%
+  inner_join(centerJoin %>% as_data_frame() %>% select(-geometry))
+
+## Get counts to see how many matchups we have in each region
+counts <- nhd.join %>%
+  st_set_geometry(NULL) %>%
+  group_by(region) %>%
+  summarize(count = n())
+
+# We'll do two pulls, first a random sample of 2,000 lakes per region and then a specific pull using just the NLA 2012 lakes because they're supposedly a statistically representative sample.  The rounding is formatting for writing to a shapefile.
+set.seed(4453)
+sample <- nhd.join %>%
+  group_by(region) %>%
+  sample_n(2000) %>%
+  ungroup() %>%
+  rename_at(vars(FDATE:LakeArea), tolower) %>%
+  mutate_at(vars(shape_leng, shape_area, meandepth, lakearea), ~format(round(., 3), nsmall = 3)) %>%
+  mutate(lakevolume = format(round(lakevolume, 2), nsmall = 2),
+         COMID = factor(COMID))
+
+#Make sure everything looks right
+mapview(sample %>% st_centroid())
+
+## OR, use the NLA 2012 sample because it's statistically representative
+nlaSamp <- read.csv('in/NLA/nla2012_wide_siteinfo_08232016.txt', stringsAsFactors = F) %>% distinct(COMID2012, .keep_all = T) %>%
+  filter(DSGN12 == 'Included')
+
+## We loose 5 lakes that for some reason we aren't in NHDPlusV2, not much to do about it.  The rounding is formatting for writing to a shapefile.
+NLAsample <- nhd.join %>% filter(COMID %in% nlaSamp$COMID2012) %>%
+  mutate(COMID = factor(COMID)) %>%
+  rename_at(vars(FDATE:LakeArea), tolower) %>%
+  mutate_at(vars(shape_leng, shape_area, meandepth, lakearea), ~format(round(., 3), nsmall = 3)) %>%
+  mutate(lakevolume = format(round(lakevolume, 2), nsmall = 2),
+         COMID = factor(COMID))
+
+
+# For now, just convert to a shapefile and upload manually, 
+# Consider incorporating the upload into the code later on.
+st_write(NLAsample, 'out/sampleLakes/NLA2012.shp')
+st_write(sample, 'out/sampleLakes/EcoReg2000.shp')
+
+#check <- st_read('out/sampleLakes/lakesHUC2_200.shp')
+# write_feather(sample %>%
+#                 st_centroid(.) %>%
+#                 st_transform(crs = 4326) %>%
+#                 rowwise() %>%
+#                 mutate(lat = geometry[2],
+#                        long = geometry[1]) %>% as.data.frame() %>% select(-geometry), 'out/lakesNLA2012.feather')
+
+lakes.join.out <- read_feather('out/lakesNLA2012.feather')
+
+
+##Take a quick look to view the distribution of lakes.
+lakes.sf <- st_read('out/sampleLakes/NLA2012.shp') %>%
+  st_transform(., 2163) %>%
+  st_point_on_surface()
+
+library(scales)
+cc <- viridis(18)
+# huc2s <- hucs %>% st_transform(.,2163) %>% group_by(REGION) %>% summarise(h2 = first(HUC_2)) %>% mutate(Label = paste0(h2,'_',REGION), levels = h2, REGION = gsub(' Region', '', REGION), REGION = reorder(REGION, as.numeric(h2)))
+
+ggplot() + 
+  geom_sf(data = region, aes(fill = region)) +
+  geom_sf(data = lakes.sf, alpha = .7, size = .6) +
+  #geom_sf(data = huc2s %>% filter(region == 'Tennessee'), color = 'cyan', fill = 'transparent', size = 1.5) +
+  scale_fill_viridis_d() +
+  theme(axis.text.x = element_blank(),
+        axis.text.y = element_blank(),
+        axis.ticks = element_blank(),
+        rect = element_blank(),
+        legend.position = 'bottom',
+        legend.title = element_blank()) +
+  guides(fill = guide_legend(ncol = 3)) +
+  ggtitle('NLA 2012 Sample Lakes and Ecoregions')
+
+ggsave('figures/sampleLakesHuc2CAHighlight.png', width = 5, height = 6, units = 'in')
+
+#use_python('/usr/local/bin/python2', required = T)
+use_condaenv('earthEngineGrabR')
+```
+
+
+```{r}
+#{python, engine.path ='/usr/local/bin/python2'}
+##repl_python basically starts a python bash window within your R chunk.  This can be used to actually interact with earth engine.
+repl_python()
+
+import time
+import ee
+import os
+#import feather
+ee.Initialize()
+
+#Source necessary functions.
+execfile('GEE_pull_functions_AM.py')
+
+#Load in Pekel water occurance Layer and Landsat Collections.
+mask = 'dswe'
+pekel = ee.Image('JRC/GSW1_0/GlobalSurfaceWater')
+
+l8 = ee.ImageCollection('LANDSAT/LC08/C01/T1_SR')
+l7 = ee.ImageCollection('LANDSAT/LE07/C01/T1_SR')
+l5 = ee.ImageCollection('LANDSAT/LT05/C01/T1_SR')
+
+#Identify collection for use in sourced functions.
+collection = 'SR'
+
+#Standardize band names between the various collections and aggregate 
+#them into one image collection
+
+bn8 = ['B2','B3', 'B4', 'B5', 'B6','B7', 'pixel_qa']
+bn57 = ['B1', 'B2', 'B3', 'B4', 'B5','B7', 'pixel_qa']
+bns = ['Blue', 'Green', 'Red', 'Nir', 'Swir1', 'Swir2', 'qa']
+  
+ls5 = l5.select(bn57, bns)
+ls7 = l7.select(bn57, bns)
+ls8 = l8.select(bn8, bns)
+
+ls = ee.ImageCollection(ls5.merge(ls7).merge(ls8))\
+.filter(ee.Filter.lt('CLOUD_COVER', 50))
+
+#Select the occurence layer in the pekel mask, which is just the 
+#percentage of water occurence over a given pixel from 1985-2015.
+#Set the percent occurance threshold and create a watermask from the result.
+# threshold = 80
+# water = pekel.select('occurrence').gt(threshold)
+# water = water.updateMask(water)
+
+lakes = ee.FeatureCollection('users/sntopp/aquaModel/lakesEcoReg500')
+
+# Filter lakes that have already been downloaded
+lakeID = lakes.aggregate_array('COMID').getInfo()
+dlDir = 'lake_data/EcoReg500'
+filesDown = os.listdir(dlDir)
+filesDown = [i.replace(".csv", "") for i in filesDown]
+
+lakeID  = [i for i in lakeID if i not in filesDown]
+counter = 0                        
+for x in range(0,len(lakeID)):
+#for x in range(0,5):
+  lake = lakes.filter(ee.Filter.eq('COMID', lakeID[x])).first()
+  shell = ee.Feature(None)
+  #FilterBounds for lake, update masks for water occurence, clouds, roads, etc.
+  #Remove any images with clouds directly over the waterbody
+  
+  lsover = ls.filterBounds(lake.geometry())\
+  .map(clipImage)
+    
+  
+## Map over sites within specific path/row and pull reflectance values
+  data = lsover.map(lakePull)#.filter(ee.Filter.lt('cScore', 50))
+  dataOut = ee.batch.Export.table.toDrive(collection = data, \
+                                            description = str(lakeID[x]),\
+                                            folder = 'aquaModel_lakesEcoReg500_looseFilt',\
+                                            fileFormat = 'csv')
+#Check how many existing tasks are running and take a break if it's >15  
+  maximum_no_of_tasks(20, 60)
+#Send next task.
+  dataOut.start()
+  counter = counter + 1
+  print('done_' + str(counter))
+
+
+#Make sure all Earth engine tasks are completed prior to moving on.  
+maximum_no_of_tasks(1,300)
+print('done')
+
+## End the python bash.
+#exit
+
+```
+
+# Download files to local directory
+
+```{r}
+files <- drive_ls('aquaModel_lakesNLA2012')
+files <- files %>% filter(!name %in% list.files('lake_data/NLA2012'))
+
+for(i in c(1:nrow(files))){
+  path <- paste0('lake_data/NLA2012/',files$name[i])
+  drive_download(as_id(files$id[i]), path, overwrite = T)
+}
+
+```
+

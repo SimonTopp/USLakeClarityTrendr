@@ -1,0 +1,786 @@
+---
+title: "Optical Model no AOD"
+author: "Simon Topp"
+date: "6/7/2019"
+output: html_document
+editor_options: 
+  chunk_output_type: console
+---
+
+```{r setup, include=FALSE}
+library(tidyverse)
+library(feather)
+library(googledrive)
+library(viridis)
+library(knitr)
+library(sf)
+library(rgdal)
+library(maps)
+library(magrittr)
+library(mlbench)
+library(caret)
+library(randomForest)
+library(doParallel)
+library(furrr)
+library(lubridate)
+library(groupdata2)
+library(CAST)
+library(mapview)
+library(onehot)
+library(Metrics)
+library(kableExtra)
+library(ggpmisc)
+library(stlplus)
+library(Hmisc)
+library(xgboost)
+library(scales)
+knitr::opts_chunk$set(error = F)
+knitr::opts_chunk$set(warning = F)
+knitr::opts_chunk$set(message = F)
+knitr::opts_chunk$set(echo = F)
+```
+
+
+```{r model_dev, eval = T, include = F}
+srMunged <- read_feather('out/srMunged.feather') %>%
+  mutate(uniqueID = row_number(),
+         #brightness = rgb2hsv(r=red,g= green, b= blue, maxColorValue = 10000)[3],
+         nir = ifelse(sat == '8', 1.01621*nir + 99.28166, nir),
+         red = ifelse(sat == '8', 0.9346232*red + 83.54783, red),
+         green = ifelse(sat == '8', 0.8975912*green + 101.77444, green),
+         NR = nir/green,
+         GR = green/red,
+         GN = green/nir)
+
+
+##Join to the NLA Ecoregions
+region <- st_read('in/NLA/NLA_Ecoregions/EcoRegsMerged.shp') %>%
+  st_simplify(., dTolerance = 15000) %>%
+  st_transform(., 4326)
+
+
+sr.sf <- srMunged %>%
+  st_as_sf(coords = c('long', 'lat'), crs = 4326) %>%
+  st_join(region, st_nearest_feature) %>%
+  filter(!is.na(region))
+
+
+features <- "green, nir, red, NR, GR, GN, brightness, CatAreaSqKm, inStreamCat, Al2O3Cat, CaOCat, Fe2O3Cat, K2OCat, MgOCat, Na2OCat, P2O5Cat, SCat, SiO2Cat, NCat, HydrlCondCat, CompStrgthCat, KffactCat, PctCarbResidCat, PctNonCarbResidCat, PctAlkIntruVolCat, PctSilicicCat, PctExtruVolCat, PctColluvSedCat, PctGlacTilClayCat, PctGlacTilLoamCat, PctGlacTilCrsCat, PctGlacLakeCrsCat, PctGlacLakeFineCat, PctHydricCat, PctEolCrsCat, PctEolFineCat, PctSalLakeCat, PctAlluvCoastCat, PctCoastCrsCat, PctWaterCat, Precip8110Cat, Tmax8110Cat, Tmean8110Cat, Tmin8110Cat, RunoffCat, ClayCat, SandCat, OmCat, PermCat, RckdepCat, WtDepCat, BFICat, ElevCat, AOD, brightness, PctDecid"
+
+features <- str_split(features, pattern = ', ')[[1]]
+
+#inputs <- c('blue', 'red', 'green', 'nir', 'swir1', 'swir2', 'SR', 'BR', 'BS', 'fai', 'ndvi', 'ndwi', 'sat=5', 'sat=7','sat=8')
+
+#inputs <- c("Tmean8110Cat", 'swir1', "nir","sat=5", "PctCarbResidCat", "OmCat", "PctCoastCrsCat", "hillshade", "PctSalLakeCat", "sat=7", 'fui.hue')
+
+#,"region=Coastal Plain", "region=Northern Appalachians", "region=Northern Plains","region=Southern Appalachians", "region=Southern Plains", "region=Temperate Planes", "region=Upper Midwest","region=Western Mountains", "region=Xeric West")
+
+#rfeVars <- read_feather('out/RfeVariablesFull.feather')
+
+inputs <- c(str_split(read_feather('out/ffsVariablesFull.feather')$var, ', ')[[1]], 'ElevCat', 'green', 'nir', 'GN', 'RunoffCat', 'PctDecid', 'Precip8110Cat') %>% .[!. %in% c('PctGlacTilCrsCat', 'PctAlluvCoastCat')]
+
+#inputs <- c(str_split("green, nir, red, NR, GR, GN, brightness, Tmean8110Cat, ElevCat, RunoffCat, Precip8110Cat, PctDecid, AOD", ', ')[[1]])
+#, blue, green, nir, red, sat=5, sat=7, sat=8, swir1, swir2, NR, BR, GR, SR, BG, BS, GS, fai, ndwi, fui.hue, Tmean8110Cat, ElevCat, RunoffCat, Precip8110Cat, PctDecid ndvi, GN, BN, Tmean8110Cat, ElevCat, RunoffCat, Precip8110Cat, Tmin8110Cat, PctWdWet, ClayCat, WtDepCat, BFICat, PctDecid
+#inputs <- inputs[!inputs %in% c('sat=5','sat=7','sat=8')]
+#inputs <- c(str_split(rfeVars$withinSD[rfeVars$parameter == 'secchi'], ', ')[[1]], 'sat=5','sat=7','sat=8') %>% .[.!='sat']
+## Top 5 When using all landscape, Tmean, ElevCat, RunOffCat, PctDecid, Precip
+
+i = 'secchi'
+mod = 'Inclusive_noBlue_St'
+e = environment()
+iteration = 'ffs'
+cons <- c('secchi')
+log = 'ln'
+filter <- T
+weight <- F
+area = 'eco'
+lakeSamp = 'NLA'
+
+source('0_ModellingFunctions.R')
+
+#Test with SDD < 10
+df <- sr.sf %>%
+  filter(parameter == i,
+         !is.na(region),
+         value <= 15) %>%
+  mutate(value = log(value)) %>%
+  rowwise() %>%
+  mutate(long = geometry[1], lat = geometry[2]) %>%
+  ungroup() %>%
+  select(-geometry)
+
+
+#If only using xgboost turn missing values into NA
+df <- df %>% na_if(-9999)
+#RF can't accept NA values, so drop our missing numbers our missing number to NAs
+#df[df == -9999] <- NA
+#df <- df %>%na.omit()
+##Pull holdout data
+set.seed(340987)
+holdOut <- df %>%
+  group_by(region) %>%
+  sample_frac(.15)
+
+df <- df %>% filter(!uniqueID %in% holdOut$uniqueID)
+
+# hist <- hist(df$value, breaks = 50, plot = F)
+# 
+# hist.tib <- tibble(breaks = factor(hist$breaks[2:length(hist$breaks)]), weights = hist$density)
+# 
+# df <- df %>%
+#   filter(value <= 10) %>%
+#   mutate(breaks = cut(value, breaks = hist$breaks, labels = hist.tib$breaks)) %>%
+#   left_join(hist.tib, by = 'breaks') %>%
+#   group_by(sat) %>%
+#   sample_frac(.90, weight = weights) %>%
+#   ungroup()
+
+#One hot encoding for xgboost
+oneHot <- onehot(df %>% select(one_of(features)))
+df.encoded <- predict(oneHot, df %>% select(one_of(features))) %>% as.data.frame(.) 
+
+
+# Split up cross validation folds based on stratified sampling
+##Try with roughly equal sized spatial clusters 
+df <- df %>% mutate(SpaceTime = paste0(region, sat),
+                      g1 = cut_number(lat, 3),
+                      date = ymd(date),
+                      julian = as.numeric(julian.Date(date))) %>%
+              group_by(g1) %>%
+              mutate(g2 = cut_number(long, 3)) %>%
+              ungroup() %>%
+              mutate(SpaceCluster = paste0(g1,g2),
+                     timeCluster = cut_number(julian, 9))
+#folds <- CreateSpacetimeFolds(df, spacevar = 'SpaceTime', k = 27, seed = 22)
+folds <- CreateSpacetimeFolds(df, spacevar = 'SpaceCluster', timevar = 'timeCluster', k= 3, seed = 34985)
+
+model = NULL
+#load('models/ffs_noBlu_ln_secchi.Rdata')
+
+if(is.null(model)){
+set.seed(25345)
+df.tt <- df %>% 
+  sample_frac(.6) %>% 
+  mutate(tt = 'train')
+
+grid_default <- expand.grid(
+  nrounds = 250,
+  max_depth = 3,
+  eta = 0.1,
+  gamma = 1,
+  colsample_bytree = .8,
+  min_child_weight = 1,
+  subsample = .75
+)
+
+
+if(iteration == 'ffs'){
+  cl <- makePSOCKcluster(availableCores()/2)
+  registerDoParallel(cl)
+  
+  train_control <- caret::trainControl(method="cv", savePredictions = T, 
+                          returnResamp = 'final', index = folds$index, 
+                          indexOut = folds$indexOut)
+  
+  model <- caret::train(
+    x = df.encoded %>% select(inputs),
+    y = df$value,
+    trControl = train_control,
+    tuneGrid = grid_default,
+    method = "xgbTree",
+    verbose = TRUE)
+  
+  stopCluster(cl)
+  }else{
+  train <- df.encoded[df$uniqueID %in% df.tt$uniqueID,]
+  test <- df.encoded[!df$uniqueID %in% df.tt$uniqueID,]
+  
+  train_Data <- xgb.DMatrix(data = as.matrix(train %>% select(inputs)), label = df[df$uniqueID %in% df.tt$uniqueID,]$value)
+  test_Data <- xgb.DMatrix(data = as.matrix(test %>% select(inputs)), label = df[!df$uniqueID %in% df.tt$uniqueID,]$value)
+    
+  model <- xgb.train(params = grid_default,
+                        data = train_Data,
+                        nrounds = 300,
+                        watchlist = list(train = train_Data, test = test_Data),
+                        verbose = TRUE,
+                        print_every_n = 20,
+                        early_stopping_rounds = 20,
+                        maximize = F,
+                        missing = -9999)
+  }
+}
+```
+
+
+```{r model_eval}
+holdout_x <- predict(oneHot, holdOut %>% select(one_of(features))) %>% 
+  as.data.frame(.) %>% 
+  select(inputs)
+
+holdout_y <- holdOut$value
+
+if(log == 'ln'){
+output <- tibble(Actual = exp(holdout_y), Predicted = exp(predict(model, as.matrix(holdout_x))), Param = 'secchi', log = 'ln', uniqueID = holdOut$uniqueID)
+}else(output <- tibble(Actual = holdout_y, Predicted = predict(model, as.matrix(holdout_x)), Param = 'secchi', log = 'none', uniqueID = holdOut$uniqueID))
+
+evals <- output %>%
+  group_by(Param, log) %>%
+  summarise(rmse = rmse(Actual, Predicted),
+            mae = mae(Actual, Predicted),
+            mape = mape(Actual, Predicted),
+            bias = bias(Actual, Predicted),
+            p.bias = percent_bias(Actual, Predicted),
+            smape = smape(Actual, Predicted)) %>%
+  mutate(iteration = iteration)
+
+evals %>% kable(digits = 2) %>% kable_styling() %>% scroll_box(width = '4in')
+
+output %>%
+  mutate(Residuals = Actual - Predicted) %>%
+  ggplot(.) + geom_histogram(aes(x = Residuals)) +
+  labs(title = 'Distribution of Residuals')
+  
+
+ggplot(output %>% filter(log == e$log), aes(x = Actual, y = Predicted)) + 
+  geom_hex(aes(fill = ..count..)) + 
+  scale_fill_viridis(name = 'Point\nCount', trans = 'log10') + 
+  geom_abline(color = 'red') + 
+  stat_poly_eq(aes(label =  paste(stat(adj.rr.label))),
+               formula = y~x, parse = TRUE, 
+               label.y = Inf, vjust = 1.3) +
+  scale_x_continuous(trans = 'log10', labels = scales::comma) +
+  scale_y_continuous(trans = 'log10', labels = scales::comma) +
+  #coord_equal(ratio = 1) +
+  facet_wrap(~Param, scales = 'free', shrink = T) +
+  labs(title = 'Secchi Validation Results', subtitle = 'Red line is 1:1')
+
+#ggsave(paste0('figures/',mod,'_ValResults.png'), width = 4, height = 3.5, units = 'in')
+
+output.full <- output %>%
+  #filter(log == 'ln') %>%
+  left_join(srMunged, by = c('uniqueID')) %>%
+  mutate(residual = Actual - Predicted,
+         year = year(date),
+         month = month(date))
+
+##############
+# Some weird hacks for reordering factors
+reorder_within <- function(x, by, within, fun = mean, sep = "___", ...) {
+  new_x <- paste(x, within, sep = sep)
+  stats::reorder(new_x, by, FUN = fun)
+}
+
+scale_x_reordered <- function(..., sep = "___") {
+  reg <- paste0(sep, ".+$")
+  ggplot2::scale_x_discrete(labels = function(x) gsub(reg, "", x), ...)
+}
+
+## Summary metrics across space time and observed value
+errorSum <- output.full %>%
+  #filter(Param == 'secchi') %>%
+  mutate(Observed.Value = Actual) %>%
+  rename(Year = year, Latitude = lat, Longitude = long) %>%
+  gather(Observed.Value, Year, Latitude, Longitude, key = 'Variable', value = 'Value') %>%
+  group_by(Variable, Param, log) %>%
+  mutate(quantile = cut_number(Value, 10, right = F, labels = F),
+         quantLabs = cut_number(Value, 10,  right = F, dig.lab = 1)) %>%
+  ungroup() %>%
+  group_by(quantile, quantLabs, Param, Variable, log) %>%
+  dplyr::summarise(mae = mae(Actual, Predicted),
+            smape = smape(Actual, Predicted),
+            p.bias = percent_bias(Actual, Predicted),
+            #mae = mae(Actual, Predicted),
+            bias = bias(Actual, Predicted)) %>%
+  gather(mae:bias, key = 'Metric', value = 'Error') %>%
+  as.data.frame() %>%
+  arrange(Param, Variable, quantile) %>%
+  mutate(order = row_number())
+
+
+spaceTimeFigs('secchi')
+#ggsave(paste0('figures/',mod,'_SpaceTimeAbs.png'), width = 6, height = 5, units = 'in')
+spaceTimeFigs('secchi', abs = F)
+#ggsave(paste0('figures/',mod,'_SpaceTimeRel.png'), width = 6, height = 5, units = 'in')
+
+#################
+model$modelInfo$varImp(model$finalModel) %>%
+  mutate(Feature = fct_reorder(rownames(.), Overall, .desc = T)) %>%
+  arrange(Overall) %>%
+  ggplot(., aes(x = Feature, y = Overall)) + geom_col() + coord_flip() +
+  labs(title = 'Feature Importance', y = 'Proportion of Splits')
+
+#ggsave(paste0('figures/',mod,'_FeatImp.png'), width = 4, height = 3.5, units = 'in')
+
+
+output.full <- output.full %>%
+  filter(Param == 'secchi', log == e$log) %>%
+  st_as_sf(coords = c('long','lat'), crs = 4326) %>% 
+  st_join(region %>% st_transform(.,4326), join = st_nearest_feature) 
+# 
+# output.full %>% 
+#   group_by(sat) %>%
+#   summarise(mae = mae(Actual, Predicted),
+#             smape = smape(Actual, Predicted),
+#             p.bias = percent_bias(Actual, Predicted),
+#             #mae = mae(Actual, Predicted),
+#             bias = bias(Actual, Predicted)) %>%
+#   gather(mae:bias, key = 'Metric', value = 'Error') %>%
+#   ggplot(., aes(x = Metric, y = Error, fill = sat)) +
+#   geom_col(position = 'dodge') +
+#   theme_bw() + 
+#   ggtitle('Absolute and Relative Error by Satellite')
+
+
+```
+
+
+```{r sat_eval, fig.height= 6}
+val.conf <- output.full %>%
+  mutate(smape = 2*(abs(Actual - Predicted)/(abs(Actual) + abs(Predicted))),
+         p.bias = (Actual - Predicted)/abs(Actual)) %>%
+  group_by(region, sat, log) %>%
+  summarise(smape = sd(smape),
+            p.bias = sd(p.bias)) %>%
+  mutate(p.bias = ifelse(is.na(p.bias), 0, p.bias),
+         smape = ifelse(is.na(smape), 0, smape)) %>%
+  gather(smape, p.bias, key = 'Metric', value = 'sd') %>%
+  st_set_geometry(NULL)
+######################
+output.full %>%
+  group_by(region, sat, log) %>%
+  summarise(smape = smape(Actual, Predicted),
+            p.bias = percent_bias(Actual, Predicted),
+            count = n()) %>%
+  gather(smape:p.bias, key = 'Metric', value = 'value') %>%
+  left_join(val.conf %>% select(region, sat, Metric, sd)) %>%
+  ggplot(.) +
+  scale_fill_viridis_c(trans = 'log10') +
+  #geom_text(x = .5, y = .5) +
+  geom_col(position = 'dodge', aes(x = Metric, y = value, fill = count, color = sat, group = sat)) +
+  geom_errorbar(position = position_dodge(.9), aes(x = Metric, ymin = value - sd, ymax = value + sd, group = sat), width = .2) +
+  #scale_y_continuous(labels = scales::percent) +
+  theme(legend.position = 'top') +
+  ggtitle('Error by region') +
+  facet_wrap(~region, scales = 'free')#, ncol = 4)
+
+ggplot(output.full %>% filter(log == e$log), aes(x = Actual, y = Predicted)) +
+  geom_point(alpha = .3) +
+  geom_smooth(method = 'lm', aes(color = sat)) +
+  #scale_fill_viridis(name = 'Point\nCount', trans = 'log10') +
+  #geom_abline(color = 'red') +
+  stat_poly_eq(aes(label =  paste(stat(adj.rr.label))),
+               formula = y~x, parse = TRUE,
+               label.y = Inf, vjust = 1.3) +
+  scale_x_continuous(trans = 'log10', labels = scales::comma) +
+  scale_y_continuous(trans = 'log10', labels = scales::comma) +
+  #coord_equal(ratio = 1) +
+  facet_wrap(~region, scales = 'free', shrink = T) +
+  labs(title = 'Regional Evaluation Performance')
+
+#ggsave(paste0('figures/',mod,'_RegionEvals.png'), width = 8, height = 6, units = 'in')
+
+dummy <- expand.grid(year = seq(1985,2018), month = c(1:12), region = factor(unique(region$region)))
+
+fieldmatch <- output.full %>%
+  filter(year < 2019,
+         !is.na(region)) %>%
+  rename(RS = Predicted, Field = Actual) %>%
+  gather(RS,Field, key = 'Measure', value = 'value') %>%
+  group_by(year, SiteID, Measure, month, region) %>%
+  summarise(median = median(value, na.rm = T)) %>%
+  group_by(year, Measure, month, region) %>%
+  summarise(median = median(median, na.rm = T)) %>%
+  right_join(dummy)%>%
+  arrange(region,year, month)%>%
+  mutate(date = as.POSIXct(paste0(year,'/',month,'/',01)))
+
+ggplot(fieldmatch %>% na.omit(), aes(date, y = median, color = Measure)) +
+  geom_point(alpha = .1) +
+  geom_smooth(method = 'loess', span = .3, se = F) +
+  facet_wrap(~region, scales = 'free', ncol = 4) +
+  labs(title = 'Smoothed SDD Trends By Region Using Coincident Testing Data') +
+  theme_bw() +
+  theme(legend.position = 'bottom')
+
+df.full.encoded <- sr.sf %>%
+  filter(parameter == i,
+         !is.na(region),
+         value <= 15) %>%
+  mutate(value = log(value)) %>%
+  as.data.frame() %>%
+  select(-geometry)
+
+df.full.encoded <- predict(oneHot, df.full.encoded %>% select(one_of(features))) %>%
+  as.data.frame(.) %>% 
+  select(inputs)
+
+sr.preds <- sr.sf %>%
+  filter(parameter == i,
+         !is.na(region),
+         value <= 15) %>%
+  mutate(value = log(value)) %>%
+  as.data.frame() %>%
+  select(date, region, Field = value, SiteID, year, month) %>%
+  mutate(RS = exp(predict(model, df.full.encoded)),
+         Field = exp(Field))
+
+sr.preds %>% filter(year < 2019,
+         !is.na(region)) %>%
+  gather(RS,Field, key = 'Measure', value = 'value') %>%
+  group_by(year, SiteID, Measure, month, region) %>%
+  summarise(median = median(value, na.rm = T)) %>%
+  group_by(year, Measure, month, region) %>%
+  summarise(median = median(median, na.rm = T)) %>%
+  right_join(dummy)%>%
+  arrange(region,year, month)%>%
+  mutate(date = as.POSIXct(paste0(year,'/',month,'/',01))) %>%
+  na.omit() %>%
+  ggplot(., aes(date, y = median, color = Measure)) +
+  geom_point(alpha = .1) +
+  geom_smooth(method = 'loess', span = .3, se = F) +
+  facet_wrap(~region, scales = 'free', ncol = 4) +
+  labs(title = 'Smoothed SDD Trends By Region Using Coincident Testing Data') +
+  theme_bw() +
+  theme(legend.position = 'bottom')
+
+
+
+#########
+
+## Read in lakes sent up to EE
+if(area == 'eco' & lakeSamp != 'NLA'){
+  lakes.up <- read_feather('out/lakesEcoReg500.feather')
+  lakesDown <- list.files('lake_data/EcoReg500', full.names = T) 
+}else if(area == 'eco' & lakeSamp == 'NLA'){
+  lakes.up <- read_feather('out/lakesNLA2012.feather')
+  lakesDown <- list.files('lake_data/NLA2012', full.names = T)
+}else{
+  lakes.up <- read_feather('out/lakesHUC2_200_out.feather') %>%
+    rename(COMID = comid,
+           region = REGION)
+  lakesDown <- list.files('lake_data/HUC2_200', full.names = T)
+}
+
+#lakesDown <- paste0(getwd(), '/lake_data_HUC2/', files$name)
+
+## Extract vector of empty files' names
+empties <- lakesDown[file.info(lakesDown)[["size"]]==1]
+lakesDown <- lakesDown[!lakesDown %in% empties]
+
+if(area == 'eco' & lakeSamp != 'NLA'){
+  lake.join <- read_feather('out/EcoReg500LakesFull.feather')
+}else if(area == 'eco' & lakeSamp == 'NLA'){
+  lake.join <- read_feather('out/NLA2012LakesFull.feather')
+}else{
+  lake.join <- read_feather('out/Huc2_200LakesFull.feather')
+}
+
+#Evaluation Sites
+sites.eval <- read_feather('out/evalSites.feather')
+
+if(area == 'eco' & lakeSamp == 'NLA'){
+  ids <- list.files('lake_data/NLA2012')
+  }else if(area == 'eco' & lakeSamp != 'NLA'){
+  ids <-list.files('lake_data/EcoReg500')
+  }else{ids <- list.files('lake_data/HUC2_200')}
+
+ids <- ids %>% strsplit(split = '.csv', fixed = T) %>% unlist()
+ids <- ids[ids %in% lake.join$COMID]
+
+
+##Load in the ice data=
+ice.free.months <- read_feather(paste0('out/', area,'_iceFreeMonths.feather'))
+#ids <- unique(as.character(lake.join$COMID))[] 
+
+plan(multiprocess(workers = availableCores()-4))
+
+Preds.out <-  ids %>% future_map_dfr(~EvalPreds(id = .,paths = lakesDown, sites.eval = lake.join, param = 'secchi', log = log, eval = F, version = 'new', model = model, features = inputs))
+
+## Use 100 for hucs and 250 for EcoRegs
+stl.boots <- c(1:75) %>% future_map_dfr(., ~bootstrap.stl(.,Preds.out, ice.free.months, NULL))
+
+plan(sequential)
+
+#write_feather(Preds.out, paste0('out/TS_Predictions_Inclusive_ST_NLA2012_',area,'.feather'))
+
+
+#Create dummy variable to insert NA's into months removed due to frozen lakes
+dummy <- expand.grid(year = seq(1985,2018), 
+                     month = c(1:12), 
+                     region = unique(region$region),
+                     parameter =c('tss', 'chl_a', 'secchi'))
+
+##Pull out mean, standard dev, and seasonal.amplitude for each huc
+stl.boots.mean <- stl.boots %>%
+  group_by(region, date, parameter) %>%
+  dplyr::summarise_at(vars(raw:remainder), .funs = c(mean, sd), na.rm = T) %>%
+  mutate(month = month(date),
+         year = year(date)) %>%
+  rename_at(.vars = vars(ends_with('fn1')), ~sub(pattern = 'fn1', replacement = 'mean', .)) %>%
+  rename_at(.vars = vars(ends_with('fn2')), ~sub(pattern = 'fn2', replacement = 'sd', .)) %>%
+  group_by(year, region) %>%
+  mutate(seas.max = max(seasonal_mean),
+         seas.min = min(seasonal_mean),
+         month.min = month[seasonal_mean == seas.min],
+         month.max = month[seasonal_mean == seas.max]) %>%
+  ungroup() %>%
+  right_join(dummy) %>%
+  left_join(region %>% st_set_geometry(NULL)) %>%
+  arrange(region, year, month) %>%
+  mutate(date = ymd(paste0(year,'-',month,'-01')))
+
+#Pull Out NLA Values for comparison
+# nla.2007 <- read.csv('in/NLA/nla2007_secchi_20091008.txt') %>%
+#   select(SITE_ID, secchi = SECMEAN, date = DATE_SECCHI) %>%
+#   left_join(read.csv('in/NLA/nla2007_sampledlakeinformation_20091113.txt') %>%
+#               select(SITE_ID, COMID = COM_ID, region = WSA_ECO9,
+#                      lat = LAT_DD, long = LON_DD))
+# 
+# nla.2012 <- read.csv('in/NLA/nla2012_secchi_08232016.txt') %>%
+#   select(SITE_ID, secchi = SECCHI, date = DATE_COL) %>%
+#   left_join(read.csv('in/NLA/nla2012_wide_siteinfo_08232016.txt') %>%
+#               select(SITE_ID, COMID = COMID2012, region = AGGR_ECO9_2015,
+#                      lat = LAT_DD83, long = LON_DD83))
+# 
+# nlaFull <- nla.2007 %>%
+#   mutate(nla.year = ymd("2007-06-15")) %>%
+#   bind_rows(nla.2012 %>% mutate(nla.year = ymd("2012-06-15"))) %>%
+#   mutate(date = mdy(date),
+#          year = year(date),
+#          month = month(date),
+#          region = factor(region,
+#                          labels = c("Coastal Plain", "Northern Appalachians", "Northern Plains", "Southern Appalachians", "Southern Plains", "Temperate Planes", "Upper Midwest","Western Mountains","Xeric West"))) %>%
+#   group_by(SITE_ID, region, nla.year) %>%
+#   summarise(secchi = median(secchi, na.rm = T)) %>%
+#   group_by(region, nla.year) %>%
+#   summarise(secchi = median(secchi, na.rm = T))
+
+## Make a figure showing the 'stability' of each watershed, basically the standard dev of the trend.
+stl.boots.mean %>%
+  filter(parameter == 'secchi') %>%
+  ggplot(., aes(x = date, y = trend_mean)) +
+  #geom_line(data = stl.boots, aes(group = factor(iteration)), color = 'grey40') +
+  geom_ribbon(aes(ymin = trend_mean - trend_sd, ymax = trend_mean + trend_sd), color = 'grey60', alpha = .4) +
+  geom_path(color = 'red') +
+  #geom_point(data = nlaFull, aes(x = nla.year, y = secchi))  +
+  theme_bw() +
+  facet_wrap(~region, scales = 'free') +
+  labs(title = 'Mean and 90% confidence bound (stability)')
+```
+
+
+```{r}
+regionalAOD <- read_feather('out/MeraEcoRegAOD.feather')
+
+Preds.out.monthly <- Preds.out%>%
+  mutate(yearMonth = ymd(paste0(year(date),'-', month(date),'-15'))) %>%
+  filter(!is.na(region)) %>%
+  group_by(region, yearMonth) %>%
+  summarise(clarity = median(value, na.rm = T)) %>%
+  left_join(regionalAOD) %>%
+  group_by(region) %>%
+  mutate(scaledAOD = rescale(AOD, to = c(min(clarity, na.rm = T), max(clarity, na.rm = T)))) %>%
+  ungroup() 
+
+Preds.out.monthly%>%
+  gather(clarity, scaledAOD, key = 'Ob.Type', value = 'value') %>%
+  ggplot(., aes(x = yearMonth, y = value, color = Ob.Type)) +
+  geom_point(alpha = .1) +
+  geom_smooth(span = .3, se = F) +
+  scale_color_brewer(palette = "Dark2") +
+  theme_bw() +
+  facet_wrap(~region, scales = 'free') +
+  labs(x = 'Date', y = 'Value', title = 'Scaled Optical Depth and Clarity Predictions')
+
+cor(Preds.out.monthly$clarity, Preds.out.monthly$AOD, use = 'complete.obs') %>%
+  kable(caption = 'Correlation between AOD and predicted clarity') %>% kable_styling()
+
+output.full %>% mutate(residual = Actual-Predicted,
+                       mtPino = ifelse(year %in% c(1992,1993), '92-93', 'other')) %>%
+  arrange(desc(mtPino)) %>%
+  ggplot(., aes(x = AOD, y = residual)) +
+  geom_point(aes(color = mtPino),alpha = .6) + 
+  scale_color_viridis_d(end = .5) +
+  labs(y = 'Residual (Actual - Predicted)',x = 'Atmospheric Optical Depth',
+       title = 'Hold-out residuals vs AOD') +
+  theme_bw() +
+  stat_poly_eq(aes(label =  paste(stat(adj.rr.label))),
+               formula = y~x, parse = TRUE, 
+               label.y = Inf, vjust = 1.3)
+
+t.test(output.full$residual[output.full$year %in% c(1992,1993)],
+       output.full$residual[!output.full$year %in% c(1992,1993)])
+
+# 
+# ## Play with atmospheric optical depth
+# Preds.out <- read_feather('out/TS_Predictions_ffs_eco.feather') %>%
+#   mutate(yearMonth = ymd(paste0(year,'-',month,'-15')))
+# 
+# ## Calculate median AOD value for each region
+# dates <- seq.Date(as.Date('1984-01-01'), as.Date('2019-07-01'), by = 'month')
+# 
+# pullMerra <- function(path = 'in/MERRA2_data2', date, geometry){
+#   AOD <- tibble(AOD = NA, region = NA, yearMonth = ymd(paste0(year(date),'-', month(date),'-15')))
+#   tryCatch({
+#   require(sf, quietly = T)
+#   require(raster, quietly = T)
+#   require(ncdf4, quietly = T)
+#   files = list.files(path, full.names = T)
+#   yearMonth <- ifelse(month(date) < 10, paste0(year(date),'0', month(date)),paste0(year(date), month(date)))
+#   file <- grep(x = files, pattern = yearMonth, value = T)
+#   brick <- raster::brick(file, varname = 'AODANA')
+#   AOD <- raster::extract(brick , geometry, fun = mean)
+#   AOD <- round(AOD, 3) %>% 
+#     as.data.frame() %>% 
+#     rename(AOD = V1) %>% 
+#     mutate(region = geometry$region,
+#            yearMonth = ymd(paste0(year(date),'-', month(date),'-15')))
+#   # AOD <- t(AOD)# %>% tibble() %>% mutate(date = date)
+#   # colnames(AOD) <- geometry$region
+#   # AOD <- as.data.frame(AOD) %>% mutate(date = date)
+#   })
+#   return(AOD)
+# }
+# 
+# plan(multiprocess(workers = availableCores()-4))
+# regionalAOD <- dates %>%
+#   future_map_dfr(~pullMerra(date = .x, geometry = region))
+# plan(sequential)
+
+##
+#write_feather(regionalAOD, 'out/MeraEcoRegAOD.feather')
+
+sr.sf %>%
+  filter(parameter == 'secchi') %>%
+  filter(year > 1984) %>%
+  group_by(year, region) %>%
+  summarise(BR = median(BR),
+            AOD = median(AOD))%>%
+  group_by(region) %>%
+  mutate(scaledAOD = rescale(AOD, to = c(min(BR, na.rm = T), max(BR, na.rm = T)))) %>%
+  ungroup() %>%
+  gather(BR, scaledAOD, key = 'Metric', value = 'Value') %>%
+  ggplot(., aes(x = year, y = Value, color = Metric)) + 
+  geom_smooth(span = .2, se = F) +
+  scale_color_brewer(palette = 'Dark2') +
+  #geom_point() +
+  theme_bw() + 
+  facet_wrap(~region, scales = 'free') +
+  labs(title = 'Median BR and AOD values by year/region for all coincident samples')
+
+cor(sr.sf$red,sr.sf$AOD, use = 'complete.obs') %>% kable(caption = 'Correlation between BR and AOD') %>% kable_styling
+
+srMunged %>%
+  filter(parameter == 'secchi',
+         red < 2000) %>%
+  mutate(mtPino = ifelse(year %in% c(1992,1993), '92-93', 'other')) %>%
+  arrange(desc(mtPino)) %>%
+  ggplot(., aes(x = AOD, y = red)) +
+  geom_point(aes(color = mtPino)) +
+  scale_color_viridis_d(end = .5, alpha = .6) +
+  stat_poly_eq(aes(label =  paste(stat(adj.rr.label))),
+               formula = y~x, parse = TRUE, 
+               label.y = Inf, vjust = 1.3)
+  
+cor(srMunged$red[srMunged$year %in% c(1992,1993)], srMunged$AOD[srMunged$year %in% c(1992,1993)]) %>%
+  kable(caption = 'Correlation between BR and AOD only during 92-93') %>% kable_styling()
+
+
+## Check BR over dense dark veg
+# files <- drive_ls('StablePointsTS')
+# 
+# for(i in c(1:nrow(files))){
+#   file <- as_id(files$id[i])
+#   path <- paste0('tmp/',files$name[i])
+#   drive_download(file, path, overwrite = T)
+# }
+
+files <- list.files('tmp', full.names = T)
+
+brCheck <- map_dfr(files, read.csv)
+
+brCheck %>%
+  filter(!is.na(blue),
+         blue > 0,
+         blue < 10000,
+         red > 0,
+         red < 10000) %>%
+  mutate(year = year(date),
+         month = month(date),
+         BR = blue/red) %>%
+  group_by(year, location) %>%
+  summarise(BR = mean(BR, na.rm = T)) %>%
+  ggplot(., aes(x = year, y = BR)) + 
+  geom_point(alpha = .2) +
+  geom_smooth(se = F, span = .2) +
+  facet_wrap(~location, scales = 'free') +
+  ggtitle('Mean BR values over stable non-lake objects')
+```
+
+
+```{r, include = F, eval = F, echo = F}
+## Quickly check the distribution of some of our predictor variables
+check <- read_feather('out/ffsVariablesFull.feather')
+
+samp <- sr.sf %>%
+  filter(parameter =='secchi') %>%
+  group_by(region) %>%
+  sample_n(500)
+
+mapview(samp, zcol = 'Tmin8110Cat')
+
+plotly::ggplotly(ggplot(lake.join, aes(x = as.numeric(inStreamCat))) + geom_histogram(binwidth = 1) + facet_wrap(~region, scales = 'free'))
+
+## Look at distributions of lake area between field data and satellite data
+
+plotly::ggplotly(df %>% group_by(year, region) %>%
+  summarise(sd_area = sd(lake_area, na.rm = T),
+            lake_area = median(lake_area, na_rm = T)) %>%
+  ggplot(., aes(x = year, y = lake_area)) + geom_line() +
+  #geom_errorbar(aes(x = year, ymin = lake_area-sd_area, ymax = lake_area+sd_area)) +
+  geom_hline(data = lake.join %>% group_by(region) %>% summarise(lake_area = median(lake_area)), aes(yintercept = lake_area)) +
+  facet_wrap(~region, scales = 'free'))
+
+
+df %>%
+  mutate(value = exp(value)) %>%
+  filter(lake_area < 1) %>%
+  group_by(year, region) %>%
+  summarise(value = median(value)) %>%
+  mutate(size = '<1sqkm') %>%
+  bind_rows(df %>%
+  mutate(value = exp(value)) %>%
+  group_by(year, region) %>%
+  summarise(value = median(value)) %>%
+  mutate(size = 'All')) %>%
+  ggplot(., aes(x = year, y = value, color = size)) + geom_line() + facet_wrap(~region, scales = 'free') +
+  ggtitle('AquaSat Field SDD Values Filtered for small lakes')
+
+
+hist(df$value)
+```
+
+
+```{r, include = F, eval = F, echo = F}
+
+
+check <- brCheck %>% filter(location == 'DDV')
+
+
+prismTemps <- read_feather(paste0('out/PRISMTemp_',area,'.feather')) %>%
+  rename_all(tolower)
+prismPrecip <- read_feather(paste0('out/PRISMPrecip_',area,'.feather')) %>%
+  rename_all(tolower)
+
+prismTemps %>%
+  mutate(year = as.numeric(year)) %>%
+  filter(year < 2019) %>%
+  group_by(year, region) %>%
+  summarise(temp = mean(value, na.rm = T)) %>%
+  ggplot(., aes(x = year, y = temp)) + 
+  geom_point() +
+  geom_smooth(se = F, span = .2) +
+  facet_wrap(~region, scales = 'free') +
+  ggtitle('Prism Temp Record')
+
+```
