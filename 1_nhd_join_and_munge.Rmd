@@ -7,10 +7,9 @@ editor_options:
   chunk_output_type: console
 ---
 
-# This script takes the downloaded reflectance data from Google Earth Engine and joins it back up with the original water quality information as well as lake, catchement, and watershed data from hydrolakes and LakeCat.
+# This script takes the downloaded reflectance data from Google Earth Engine and joins it back up with the original water quality information as well as lake, catchement, and watershed data from NHDPlusV2 and LakeCat.
 
 ```{r setup, eval = F}
-library(googledrive)
 library(tidyverse)
 library(feather)
 library(viridis)
@@ -21,12 +20,10 @@ library(maps)
 library(magrittr)
 library(mlbench)
 library(caret)
-library(randomForest)
 library(doParallel)
 library(furrr)
 library(kableExtra)
 library(dataRetrieval)
-library(hydrolinks)
 library(USAboundaries)
 library(lubridate)
 ```
@@ -41,8 +38,6 @@ sr <- read.csv('../Aquasat/3_rswqjoin/data/out/sr_wq_rs_join.csv', stringsAsFact
   filter(!is.na(value)) %>%
   mutate(UniqueID = row_number())
 
-sr.sf <- st_as_sf(sr,coords=c('long','lat'), crs=4326)
-
 # Create Ecoregions shapefile the same as those used in the NLA lake assessments to join to our training data following Herlihy  et al. 2008 https://bioone.org/journals/Freshwater-Science/volume-27/issue-4/08-081.1/Striving-for-consistency-in-a-national-assessment--the-challenges/10.1899/08-081.1.full
 
 # ecoRegs <- st_read('in/NLA/us_eco_l3/us_eco_l3.shp') %>%
@@ -56,8 +51,10 @@ sr.sf <- st_as_sf(sr,coords=c('long','lat'), crs=4326)
 # 
 # st_write(ecoRegs, 'in/NLA/NLA_Ecoregions/EcoRegsMerged.shp')
 
-region <- st_read('in/NLA/NLA_Ecoregions/EcoRegsMerged.shp') %>%
-  st_simplify()
+region <- st_read('in/NLA/NLA_Ecoregions/EcoRegsMerged.shp')
+
+sr.sf <- st_as_sf(sr,coords=c('long','lat'), crs=4326) %>%
+  st_transform(st_crs(region))
 
 ```
 
@@ -83,45 +80,63 @@ for (file in filenames){
 ## Join the data to NHD to extract additional landscape and lake specific variables
 
 ```{r packages_sites, eval=TRUE, echo=TRUE, warning=FALSE, include=TRUE, message=FALSE}
-# Create directory to save nhd and hydrolakes directory to.
-hydrolinks::cache_set_dir(path = 'D:/hydroLinkstTmp')
+#Make an SF object of individual sites
+sites.sf <- sr %>%
+  distinct(SiteID, lat, long) %>%
+  mutate(x = long, y = lat) %>% #Preserve lat and long in ouput object
+  st_as_sf(.,coords=c('x','y'), crs=4326) %>%
+  st_transform(st_crs(region))
 
-# Join SR data with NHDPlusV2 in order to connect our samples to data from the LakeCat dataset.
-
-plan(multiprocess(workers = 10))
-
-nhdJoin <- sr %>%
-  select(SiteID, lat, long) %>%
-  distinct() %>%
-  #sample_n(20) %>%
-  split(.,c(1:10)) %>%
-  future_map_dfr(~link_to_waterbodies(lats = .$lat, lons = .$long, ids = .$SiteID, buffer = 90, dataset = 'nhdplusv2')) 
- 
+##Join sites to the regions
+plan(multiprocess)
+reg.Join <- sites.sf %>%
+  split(., c(1:10)) %>%
+  future_map(~st_join(., region %>% st_simplify(dTolerance = 500), join = st_nearest_feature), .progress = T)
 plan(sequential)
 
-write_feather(nhdJoin,'out/dswe_nhdPlusv2Join.feather')
+## For some reason map_dfr and row_bind don't play well with spatial data so join them the clunky way.
+reg.Join <- rbind(reg.Join[[1]], reg.Join[[2]], reg.Join[[3]], reg.Join[[4]], reg.Join[[5]], reg.Join[[6]],
+               reg.Join[[7]], reg.Join[[8]], reg.Join[[9]], reg.Join[[10]])
 
-```
+## Load in nhd lake data downlowded from, http://www.horizon-systems.com/NHDPlus/V2NationalData.php
+nhdLakes <- st_read('D:/GIS_Data/NHD/nhdPlusV2_WaterBodiesFull.shp') %>%
+  filter(FTYPE == 'LakePond' | FTYPE == 'Reservoir') %>%
+  st_transform(st_crs(region))
 
-## Connect WQP and Lagos sites to NHD data
+plan(multiprocess)
+centerJoin <- reg.Join %>%
+  st_buffer(90) %>% ##Add buffer to capture sample sites at lake edges
+  split(., c(1:10)) %>%
+  future_map(~st_join(.,nhdLakes), .progress = T)
+plan(sequential)
 
-```{r}
-nhdJoin <- read_feather('out/dswe_nhdPlusv2Join.feather')
+centerJoin <- rbind(centerJoin[[1]], centerJoin[[2]], centerJoin[[3]], centerJoin[[4]], centerJoin[[5]],
+                    centerJoin[[6]], centerJoin[[7]], centerJoin[[8]], centerJoin[[9]], centerJoin[[10]])
 
-sr.nhd.join <- sr %>%
-  left_join(nhdJoin, by = c('SiteID' = 'MATCH_ID')) %>%
-  rename(COMID = comid)
-
-#We end up with ~100 duplicates, check um out.
-check <- sr.nhd.join %>% group_by(UniqueID) %>%
-  summarise(count = n()) %>%
+##2680 sites aren't within 90 meters of a waterbody and ~178 sites are within 90 meters of 2 or more bodies
+check <- centerJoin %>%
+  group_by(SiteID) %>%
+  summarize(count = n()) %>%
   filter(count > 1)
-check <- sr.nhd.join %>% filter(UniqueID %in% check$UniqueID)
-mapview::mapview(check %>% st_as_sf(coords = c('long','lat'), crs = 4326), zCol = 'UniqueID')
-## Almost entirely areas where a site joined with a lake and a neighboring swamp/marsh in 5 places in the great lakes region.  These will drop out later when we filter by ftype.
+check <- centerJoin %>% filter(SiteID %in% check$SiteID)
+
+##Do join with no buffer for sites with multiple returns
+dup.join <- reg.Join %>% filter(SiteID %in% check$SiteID) %>% st_join(.,nhdLakes)
+
+## Remove duplicates and join up with the unbuffered join.
+centerJoin <- centerJoin %>% 
+  st_centroid() %>%
+  filter(!SiteID %in% check$SiteID) %>% rbind(dup.join)
+
+## Real quick look at how many obs we loose from no COMID 
+missing <- centerJoin %>% filter(is.na(COMID))
+check <- sr %>% filter(SiteID %in% missing$SiteID)
+## Its about 24k obs, pretty close to what we get with HydroLakes Join, of those ~ 12k are secchi.
+
+##Finally, munge the landscape variables from LakeCat and connect it to our lake data
 
 ## Connect it all to the lakeCat data previously downloaded using the COMID identifier
-lakeCat <- tibble(COMID = unique(sr.nhd.join$COMID)) 
+lakeCat <- tibble(COMID = unique(centerJoin$COMID)) 
 lc.files <- list.files('in/lakeCat/unzip', full.names = T)
 
 for(i in lc.files){
@@ -142,7 +157,7 @@ for(i in lc.files){
 lakeCat.full <- read_feather('out/lakeCatFull.feather')
 
 
-#############Munge the lakeCat data a little:
+#############  Munge the lakeCat data a little:
 # Look at the names of the variables to select appropriate inputs. See 
 # ftp://newftp.epa.gov/EPADataCommons/ORD/NHDPlusLandscapeAttributes/LakeCat/Documentation/VariableList-QuickReference.html 
 # for variable descriptions.
@@ -201,7 +216,10 @@ lakeCat.munged <- lakeCat.munged %>%
 ## Double check
 summary(lakeCat.munged)
 
-write_feather(lakeCat.munged, 'out/lakeCatMunged.feather')
+site.data.full <- centerJoin %>% left_join(lakeCat.munged)
+
+#write_feather(site.data.full %>% as.data.frame() %>% select(-geometry), 'out/siteInfoFull.feather')
+
 ```
 
 # Check for duplicates between lagos and wqp now that we have lakes linked to SiteIDs
@@ -211,7 +229,8 @@ write_feather(lakeCat.munged, 'out/lakeCatMunged.feather')
 # we can check for observations that may be getting 
 # double counted due to WQP and Lagos inclusion.
 
-obs.check <- sr.nhd.join %>% 
+obs.check <- sr %>% 
+  left_join(site.data.full %>% as_data_frame(.) %>% select(-geometry)) %>%
   mutate(doubleID = paste0(COMID, parameter, value, landsat_id, date, lat, long)) %>%
   group_by(doubleID) %>%
   summarize(count = n()) %>%
@@ -220,7 +239,8 @@ obs.check <- sr.nhd.join %>%
 sum(obs.check$count)
 
 # Look at the duplicates to make sure they're all in LAGOs area
-check <- sr.nhd.join %>%
+check <- sr %>% 
+  left_join(site.data.full %>% as_data_frame(.) %>% select(-geometry)) %>%
   mutate(doubleID = paste0(COMID, parameter, value, landsat_id, date, lat, long)) %>%
   filter(doubleID %in% obs.check$doubleID) %>%
   st_as_sf(coords=c('long','lat'),crs=4326) %>%
@@ -237,8 +257,7 @@ duplicates <- check %>%
             blue_sd = sd(blue),
             green_sd = sd(green),
             nir_sd = sd(nir)) %>%
-  mutate(SameRef = ifelse(red_sd + blue_sd + green_sd + nir_sd == 0, 'Same', 'Different')) #%>%
-  gather(red_sd:nir_sd, key = 'st.dev', value = 'value')
+  mutate(SameRef = ifelse(red_sd + blue_sd + green_sd + nir_sd == 0, 'Same', 'Different'))
 
 ggplot(duplicates) + geom_bar(aes(x = SameRef, y = ..count..))
 ggplot(check) + geom_bar(aes(x = source))
@@ -249,11 +268,13 @@ ggplot(check) + geom_bar(aes(x = source))
 
 ## Workflow for creating munged parameter dataframe from fully joined reflectance, NHD, and hydrolakes data.
 ```{r}
+source('0_ModellingFunctions.R')
+
 # Function for munging full data based on reasonable values.  
 munger <- function(df, param, dswe = 1, dswe.sd = 0, minPix = 8, maxClouds = 50, maxTimeDiff = 129600, maxRef = 2000, minRef = 1, h.shadow = 1, h.shadow_sd = 0){
   
   minValue = 0.001
-  maxValue = quantile(df$value, .999)
+  maxValue = quantile(df$value, .99)
   
   if(param == 'doc'){
     minValue = 0.1  #from sobek 2007
@@ -269,8 +290,7 @@ munger <- function(df, param, dswe = 1, dswe.sd = 0, minPix = 8, maxClouds = 50,
     maxValue = 45} #deepest recorded lake sdd by Larson et al 2007
 
   data <- df %>%
-    filter(type %in% type,
-         pixelCount > minPix, # We want at least 9 good water pixels
+    filter(pixelCount > minPix, # We want at least 9 good water pixels
          hillshadow == h.shadow, # No shadow effects
          hillshadow_sd <= h.shadow_sd, 
          clouds < maxClouds,
@@ -280,8 +300,7 @@ munger <- function(df, param, dswe = 1, dswe.sd = 0, minPix = 8, maxClouds = 50,
          value > minValue,
          value < maxValue) %>%
     filter_at(vars(blue,green,red,nir,swir1,swir2),all_vars(.>minRef & .<maxRef)) %>%
-    mutate(COMID = as.factor(COMID),
-           date = ymd(date),
+    mutate(date = ymd(date),
            date_unity = ymd_hms(date_unity),
            month = month(date),
            year = year(date),
@@ -305,30 +324,30 @@ munger <- function(df, param, dswe = 1, dswe.sd = 0, minPix = 8, maxClouds = 50,
            ndvi = ((nir-red)/(nir+red)),
            ndwi = ((green- swir1)/(green + swir1)),
            dWL = fui.hue(red, green, blue)) %>%
-    select(-c(system.index, pixelCount, qa, qa_sd, date_only, .geo, fdate, resolution, type,fcode)) 
+    select(-c(system.index, pixelCount, qa, qa_sd, date_only)) 
 return(data)
 }
 
 files <- list.files('in/MERRA2_data2', full.names = T)
 
-munged <- sr.nhd.join %>%
+munged <- sr %>%
   group_by(parameter) %>%
   nest() %>%
   mutate(munge = purrr::map2(.x = data, .y = parameter, ~munger(.x, param = .y, dswe.sd = .4))) %>%
   select(-data) %>%
   unnest(munge) %>%
-  filter(!is.na(COMID),
-         ## We loose ~20k obs which aren't within 90 meters of a NHD Lake
-         ftype %in% c('Reservoir', 'LakePond')) %>% 
-  mutate(Reservoir = factor(ifelse(ftype == "Reservoir", 1, 0))) %>%
+  left_join(site.data.full) %>%
+  filter(!is.na(COMID)) %>%
+         ## We loose ~20k obs which aren't within 90 meters of a NHD Lake 
+  mutate(Reservoir = factor(ifelse(FTYPE == "Reservoir", 1, 0))) %>%
   distinct(COMID, value, parameter, landsat_id, date, lat, long, .keep_all = T) %>% #remove duplicate values (see workflow at line ~200)
-## Finally, tag on Aerosol Optical Depth from the MERRA-2 Reanalysis and add the Forel-Ule Index hue angle according to Wang et al 2015
+## Finally, tag on Aerosol Optical Depth from the MERRA-2 Reanalysis
   rowwise() %>%
   mutate(AOD = pullMerra(date = date, lat = lat, long =long)) %>%
   ungroup() %>%
+  select(-.geo)
   ##Join to NLA EcoRegions
-
-
+munged <- munged %>% select(-geometry)
 write_feather(munged, 'out/srMunged.feather')
 ```
 
@@ -337,15 +356,6 @@ write_feather(munged, 'out/srMunged.feather')
 ```{r}
 munged.sf <- st_as_sf(munged,coords=c('long','lat'), crs=4326) %>%
     st_transform(.,2163)
-
-huc.munged.sf <- munged.sf %>%
-  st_join(hucs) %>%
-  as_tibble() %>%
-  filter(!is.na(value)) %>%
-  group_by(HUC_8, parameter) %>%
-  summarize(Overpasses=n()) %>%
-  filter(Overpasses > 0) %>%
-  left_join(hucs, by = 'HUC_8')
 
 ggplot() +
   geom_sf(data = usa, fill = 'grey40') + 
