@@ -9,7 +9,6 @@ editor_options:
 # This script takes the munged optical and landscape data and runs it through various feature selection algorithms to determine the inputs for the final models.
 
 ```{r setup, eval = F}
-library(googledrive)
 library(tidyverse)
 library(feather)
 library(viridis)
@@ -36,144 +35,116 @@ library(ggpmisc)
 #Attempt at FFS Using xgboost and spatial cross validation.
 
 ```{r}
+## Quick Notes from Matt
+## Ideas from Matt, the small area
+## litho ones worth checking out 114, impervious and ag, wetland ones, Pct Crop, make forest one thats sum WetIndex Cat. BFICat, NPDES?
+## Do some final munging/feature engineering
+log = F
+iteration = 'dWL_Noln_sat_Secchi'
+region <- st_read('in/NLA/NLA_Ecoregions/EcoRegsMerged.shp')
+
 srMunged <- read_feather('out/srMunged.feather') %>%
-  filter(parameter == 'secchi') %>%
-  left_join(read_feather('out/lakeCatMunged.feather') %>% mutate(COMID = as.character(COMID)))
+  filter(parameter == 'secchi',
+         value <= 10,
+         !is.na(CatAreaSqKm)) %>% #100 obs that didn't match up with LakeCat
+  mutate(COMID = as.character(COMID),
+         pctForest2006 = PctDecid2006Cat + PctConif2006Cat + PctMxFst2006Cat,
+         pctUrban2006 = PctUrbMd2006Cat + PctUrbHi2006Cat,
+         pctWetland2006 = PctWdWet2006Cat + PctHbWet2006Cat,
+         areasqkm = round(areasqkm, 1),
+         meandused = round(meandused, 1),
+         inStreamCat = as.numeric(inStreamCat),
+         ##Corect based on simple linear regs (see _l7l8_Comps.Rmd)
+         nir = ifelse(sat == '8', 1.01621*nir + 99.28166, nir),
+         red = ifelse(sat == '8', 0.9346232*red + 83.54783, red),
+         blue = ifelse(sat == '8',0.8667114*blue + 123.16116, blue),
+         green = ifelse(sat == '8', 0.8975912*green + 101.77444, green),
+         NR = nir/red,
+         BR = blue/red,
+         GR = green/red,
+         NR = nir/red,
+         SR = swir1/red,
+         BG = blue/green,
+         BN = blue/nir,
+         BS = blue/swir1,
+         GS = green/swir1,
+         GN = green/nir,
+         fai = nir - (red + (swir1-red)*((830-660)/(1650-660))),
+         ndvi = ((nir-red)/(nir+red)),
+         ndwi = ((green- swir1)/(green + swir1)),
+         dWL = fui.hue(red, green, blue)) %>%
+  rowwise() %>%
+  mutate(saturation = rgb2hsv(r=red, g=green, b=blue, maxColorValue = 2000)[2],
+         brightness = rgb2hsv(r=red,g= green, b= blue, maxColorValue = 2000)[3]) %>%
+  ungroup()
 
+srMunged[srMunged == -9998] = NA ##Standardize missing values
+##See if removing the ~2k obs with missing depth helps, it doesn't
+#srMunged <- srMunged %>% filter(!is.na(meandused))
 
-##Join to the NLA Ecoregions
-region <- st_read('in/NLA/NLA_Ecoregions/EcoRegsMerged.shp') %>%
-  st_simplify(., dTolerance = 1500) %>%
-  st_transform(., 4326)
-
-
-sr.sf <- srMunged %>%
-  st_as_sf(coords = c('long', 'lat'), crs = 4326) %>%
-  st_join(region, join = st_nearest_feature) %>%
-  filter(!is.na(region))
-
-## Check the final counts
-counts <- sr.sf %>%
-  group_by(parameter)%>%
-  summarise(count = n())
+if(log == T){srMunged <- srMunged %>% mutate(value = log(value))}
 
 ## Select parameters to go into model
-paste0(names(sr.sf), collapse = ', ')
+paste0(names(srMunged), collapse = ', ')
 
-features <- "green, nir, red, NR, GR, GN, brightness, CatAreaSqKm, inStreamCat, Al2O3Cat, CaOCat, Fe2O3Cat, K2OCat, MgOCat, Na2OCat, P2O5Cat, SCat, SiO2Cat, NCat, HydrlCondCat, CompStrgthCat, KffactCat, PctCarbResidCat, PctNonCarbResidCat, PctAlkIntruVolCat, PctSilicicCat, PctExtruVolCat, PctColluvSedCat, PctGlacTilClayCat, PctGlacTilLoamCat, PctGlacTilCrsCat, PctGlacLakeCrsCat, PctGlacLakeFineCat, PctHydricCat, PctEolCrsCat, PctEolFineCat, PctSalLakeCat, PctAlluvCoastCat, PctCoastCrsCat, PctWaterCat, Precip8110Cat, Tmax8110Cat, Tmean8110Cat, Tmin8110Cat, RunoffCat, ClayCat, SandCat, OmCat, PermCat, RckdepCat, WtDepCat, BFICat, ElevCat, AOD, brightness"
+## These parameters make sense in terms of their mechanisms, resolution (with some assumptions), and reliability
+features <- "green, nir, red, NR, GR, GN, inStreamCat, PctCarbResidCat, Precip8110Cat, Tmean8110Cat, RunoffCat, ClayCat, SandCat, OmCat, PermCat, RckdepCat, WtDepCat, BFICat, ElevCat, AOD, BFICat, KffactCat, CatAreaSqKm, PctAg2006Slp10Cat, ElevCat, NPDESDensCat, HydrlCondCat, PctImp2006Cat, pctUrban2006, pctForest2006, PctCrop2006Cat, PctImp2006Cat, pctWetland2006, WetIndexCat, areasqkm, meandused, sat"
+features <- str_split(features, pattern = ', ') %>% unlist()
 
-# features <- "blue, green, nir, red, sat, swir1, swir2, NR, BR, GR, SR, BG, BN, BS, GS, GN, fai, ndvi, ndwi, AOD, fui.hue"
+##Pull holdout data
+set.seed(340987)
+holdOut <- srMunged %>%
+  group_by(region) %>%
+  sample_frac(.2)
 
-features <- str_split(features, pattern = ', ')[[1]]
+df <- srMunged %>% filter(!UniqueID %in% holdOut$UniqueID)
 
-groups = c('secchi')
-i <- 'secchi'
+#One hot encoding for xgboost
+oneHot <- onehot(df %>% select(features))
+df.encoded <- predict(oneHot, df %>% select(features)) %>% as.data.frame(.) 
 
-## Loop over the variables iteratively conducting the recurrent feature elimination, could do this with a mapped function,
-## but this is a little easier.
+# Split up cross validation folds based on stratified sampling
+df <- df %>% mutate(SpaceTime = paste0(region, sat),
+                    group1 = cut_number(lat, 3),
+                    date = ymd(date),
+                    julian = as.numeric(julian.Date(date))) %>%
+            group_by(group1) %>%
+            mutate(group2 = cut_number(long, 3)) %>%
+            ungroup() %>%
+            mutate(spaceCluster = paste0(group1,group2),
+                   timeCluster = cut_number(julian, 9))
 
-## After some examination of the data, consider removing temporally explicit variables that can potentially lead to step changes in resulting model
+folds <- CreateSpacetimeFolds(df, spacevar = 'spaceCluster', timevar = 'timeCluster', k= 3, seed = 34985)
 
-#for (i in groups){
-  
-#Test with SDD < 15
-  df <- sr.sf %>%
-    filter(parameter == i,
-           !is.na(region),
-           value <= 15) %>%
-    mutate(value = log(value)) %>%
-    rowwise() %>%
-    mutate(long = geometry[1], lat = geometry[2]) %>%
-    ungroup() %>%
-    select(-geometry)
+control <- trainControl(method="cv", savePredictions = 'none', 
+                        returnResamp = 'final', index = folds$index, 
+                        indexOut = folds$indexOut)
 
-  
-  #If only using xgboost turn missing values into NA
-  df <- df %>% na_if(-9999)
-  #RF can't accept NA values, so drop our missing numbers our missing number to NAs
-  #df[df == -9999] <- NA
-  #df <- df %>%na.omit()
-  ##Pull holdout data
-  set.seed(340987)
-  holdOut <- df %>%
-    group_by(region) %>%
-    sample_frac(.2)
-  
-  df <- df %>% filter(!uniqueID %in% holdOut$uniqueID)
-  
+## Do initial feature selection with conservative hyperparameters
+ffs.tuneGrid <- expand.grid(nrounds = 300, max_depth = 4, eta = .1, 
+                            gamma = 1, min_child_weight = 1, colsample_bytree = .6,
+                            subsample = .6)
 
-  #One hot encoding for xgboost
-  oneHot <- onehot(df %>% select(one_of(features)))
-  df.encoded <- predict(oneHot, df %>% select(one_of(features))) %>% as.data.frame(.) 
-  
-  # Split up cross validation folds based on stratified sampling
-  df <- df %>% mutate(SpaceTime = paste0(region, sat),
-                      g1 = cut_number(lat, 3),
-                      date = ymd(date),
-                      julian = as.numeric(julian.Date(date))) %>%
-              group_by(g1) %>%
-              mutate(g2 = cut_number(long, 3)) %>%
-              ungroup() %>%
-              mutate(SpaceCluster = paste0(g1,g2),
-                     timeCluster = cut_number(julian, 9))
-  
-  folds <- CreateSpacetimeFolds(df, spacevar = 'SpaceCluster', timevar = 'timeCluster', k= 3, seed = 34985)
-  
-  control <- trainControl(method="cv", savePredictions = T, 
-                          returnResamp = 'final', index = folds$index, 
-                          indexOut = folds$indexOut)
-  
-  #ffs.tuneGrid <- expand.grid(mtry = 2)
-  ffs.tuneGrid <- expand.grid(nrounds = 500, max_depth = 4, eta = .1, 
-                              gamma = 1, min_child_weight = 1, colsample_bytree = .6,
-                              subsample = .6)
-  
-  # Takes awhile, so set it up all to run in parrallel
-  cl <- makePSOCKcluster(availableCores() - 4)
-  registerDoParallel(cl)
-  
-  ffs <- ffs(df.encoded, df$value, method = 'xgbTree', metric = 'RMSE', 
-             tuneGrid = ffs.tuneGrid, trControl = control, verbose = T)
+# Takes awhile, so set it up all to run in parrallel
+cl <- makePSOCKcluster(availableCores() - 4)
+registerDoParallel(cl)
 
-  stopCluster(cl)
-  
-  
-  
-  if(i == first(groups)){
-    ffsResults <- ffs$perf_all %>%
-      mutate(parameter = i)
-    
-    ffsVariables <- tibble(var = list(ffs$selectedvars),
-                          parameter = i)
-  }else{
-    ffsResults <- ffsResults %>%
-      bind_rows(ffs$perf_all %>% 
-                  mutate(parameter = i))
-    ffsVariables <- ffsVariables %>%
-      bind_rows(tibble(var = list(ffs$selectedvars),
-                          parameter = i))
-  }
-  print(paste0('done ',i))
-#  }
+ffs <- ffs(df.encoded, df$value, method = 'xgbTree', metric = 'RMSE', 
+           tuneGrid = ffs.tuneGrid, trControl = control, verbose = T)
 
+stopCluster(cl)
 
-ffsVariables <- ffsVariables %>%
-  mutate(n_vars = map_int(var, length)) %>%
-  rowwise() %>%
-  # Collapse the returned lists into a single character vector, we'll expand this back out later.
-  mutate(var = paste(unlist(var), sep= '', collapse = ', '))
+ffsResults <- ffs$perf_all
 
 # Save the results
 write_feather(ffsResults, 'out/ffsResultsFull.feather')
-write_feather(ffsVariables,'out/ffsVariablesFull.feather')
 
 ffsResults %>%
-  group_by(nvar, parameter) %>%
+  group_by(nvar) %>%
   summarise(RMSE = median(RMSE),
             SE = median(SE)) %>%
   ggplot(.) + geom_line(aes(x = nvar, y = RMSE)) +
-  geom_errorbar(aes(x = nvar, ymin = RMSE - SE, ymax = RMSE + SE), color = 'red') +
-  facet_wrap(~parameter, scales = 'free')
+  geom_errorbar(aes(x = nvar, ymin = RMSE - SE, ymax = RMSE + SE), color = 'red')
 
 #ggsave('figures/rfeRMSE.png', device = 'png', width = 6, height = 4, units = 'in')
 ```
@@ -181,9 +152,17 @@ ffsResults %>%
 ### XGBoost with Default Hyperparameters
 
 ```{r baseline model, message=FALSE}
+# ffsVariables <- read_feather('out/ffsResultsFull.feather')
+# features <- ffsVariables[ffsVariables$RMSE == min(ffsVariables$RMSE),] %>%
+#   select(-c(nvar, RMSE, SE)) %>%
+#   paste(.) %>% .[.!= 'NA']
+#PctImp2006Cat,pctForest2006,
+features <- str_split("dWL, NR, BG, meandused, Tmean8110Cat, PermCat, AOD, RunoffCat, WtDepCat, PctCarbResidCat, areasqkm, inStreamCat", ', ')[[1]] 
 
-inputs <- c(str_split(ffsVariables$var, ', ')[[1]])#, 'sat=7','sat=8')
-inputs <- str_split("blue, green, nir, red, sat=5, sat=7, sat=8, swir1, swir2, NR, BR, GR, SR, BG, BN, BS, GS, GN, fai, ndvi, ndwi, AOD, fui.hue", ', ')[[1]] 
+oneHot <- onehot(df %>% select(features))
+df.encoded <- predict(oneHot, df %>% select(features)) %>% as.data.frame(.) 
+
+
 # We'll set up a tuning grid with default values, define a `trainControl()`
 # function (which in this case disables printing training log to console
 # plus disables resampling as we want to use all training data to fit the
@@ -208,7 +187,7 @@ train_control <- caret::trainControl(method="cv", savePredictions = T,
                           indexOut = folds$indexOut)
 
 xgb_base <- caret::train(
-  x = df.encoded %>% select(inputs),
+  x = df.encoded,
   y = df$value,
   trControl = train_control,
   tuneGrid = grid_default,
@@ -263,7 +242,7 @@ tune_control <- caret::trainControl(
 )
 
 xgb_tune <- caret::train(
-  x = df.encoded %>% select(inputs),
+  x = df.encoded,
   y = df$value,
   trControl = tune_control,
   tuneGrid = tune_grid,
@@ -312,7 +291,7 @@ tune_grid2 <- expand.grid(
 )
 
 xgb_tune2 <- caret::train(
-  x = df.encoded %>% select(inputs),
+  x = df.encoded,
   y = df$value,
   trControl = tune_control,
   tuneGrid = tune_grid2,
@@ -346,7 +325,7 @@ tune_grid3 <- expand.grid(
 )
 
 xgb_tune3 <- caret::train(
-  x = df.encoded %>% select(inputs),
+  x = df.encoded,
   y = df$value,
   trControl = tune_control,
   tuneGrid = tune_grid3,
@@ -382,7 +361,7 @@ tune_grid4 <- expand.grid(
 )
 
 xgb_tune4 <- caret::train(
-  x = df.encoded %>% select(inputs),
+  x = df.encoded,
   y = df$value,
   trControl = tune_control,
   tuneGrid = tune_grid4,
@@ -399,15 +378,15 @@ xgb_tune4$bestTune
 # After the inspection, we can set the gamma to `r xgb_tune4$bestTune$gamma`. 
 # RMSE of this model is `r round(min(xgb_tune4$results$RMSE), digits=5)`
 # `r if(xgb_tune4$bestTune$gamma!=0){glue("which is {round((min(xgb_tune3$results$RMSE)/min(xgb_tune4$results$RMSE)-1)*100, digits=2)}% improvement.")}else{"."}`
-# 
+#
 # ## Step 5: Reducing the Learning Rate
 # 
 # Now, we have tuned the hyperparameters and can start reducing the learning
 # rate to get to the final model:
 
 tune_grid5 <- expand.grid(
-  nrounds = seq(from = 100, to = 1000, by = 100),
-  eta = c(0.1, .15, .2), #c(0.01, 0.015, 0.025, 0.05, 0.1),
+  nrounds = seq(from = 100, to = 1000, by = 50),
+  eta = c(0.05, 0.1, .15, .2), #c(0.01, 0.015, 0.025, 0.05, 0.1),
   max_depth = xgb_tune2$bestTune$max_depth,
   gamma = xgb_tune4$bestTune$gamma,
   colsample_bytree = xgb_tune3$bestTune$colsample_bytree,
@@ -416,7 +395,7 @@ tune_grid5 <- expand.grid(
 )
 
 xgb_tune5 <- caret::train(
-  x = df.encoded %>% select(inputs),
+  x = df.encoded,
   y = df$value,
   trControl = tune_control,
   tuneGrid = tune_grid5,
@@ -455,8 +434,11 @@ xgb_tune5$bestTune
   subsample = xgb_tune5$bestTune$subsample
 ))
 
+# cl <- makePSOCKcluster(6)
+# registerDoParallel(cl)
+
 (model <- caret::train(
-  x = df.encoded %>% select(inputs),
+  x = df.encoded,
   y = df$value,
   trControl = train_control,
   tuneGrid = final_grid,
@@ -464,10 +446,7 @@ xgb_tune5$bestTune
   verbose = TRUE
 ))
 
-
 stopCluster(cl)
-
-
 ```
 
 
@@ -489,24 +468,20 @@ stopCluster(cl)
 # By testing the performance with the hold-out set, we can see the effects that 
 # the tuning had over the two baseline models: 
 
-holdout_x <- predict(oneHot, holdOut %>% select(one_of(features))) %>% 
-  as.data.frame(.) %>% 
-  select(inputs)
+holdout_x <- predict(oneHot, holdOut %>% select(features))
 
 holdout_y <- holdOut$value
 
-(xgb_base_rmse <- ModelMetrics::rmse(holdout_y, predict(xgb_base, newdata = holdout_x)))
-(xgb_model_rmse <- ModelMetrics::rmse(holdout_y, predict(model, newdata = holdout_x)))
+if(log == T){
+output <- tibble(Actual = exp(holdout_y), Predicted = exp(predict(model, holdout_x)), log = 'ln', UniqueID = holdOut$UniqueID)
+}else{output <- tibble(Actual = holdout_y, Predicted = predict(model, holdout_x), log = 'none', UniqueID = holdOut$UniqueID)}
 
-
-output <- tibble(Actual = exp(holdout_y), Predicted = exp(predict(model, holdout_x)), Param = 'secchi', log = 'ln', uniqueID = holdOut$uniqueID)
-
-save(model, file = 'models/ffs_noBlu_ln_secchi.Rdata')
+save(model, file = paste0('models/',iteration, '.Rdata'))
+write_feather(output, paste0('out/outputs/',iteration, '.feather'))
 ```
 
 ```{r Eval}
 evals <- output %>%
-  group_by(Param, log) %>%
   summarise(rmse = rmse(Actual, Predicted),
             mae = mae(Actual, Predicted),
             mape = mape(Actual, Predicted),
@@ -517,25 +492,26 @@ evals <- output %>%
 
 evals %>% kable(digits = 2) %>% kable_styling() %>% scroll_box(width = '4in')
 
-ggplot(output %>% filter(log == e$log), aes(x = Actual, y = Predicted)) + 
+ggplot(output, aes(x = Actual, y = Predicted)) + 
   geom_hex(aes(fill = ..count..)) + 
   scale_fill_viridis(name = 'Point\nCount', trans = 'log10') + 
   geom_abline(color = 'red') + 
   stat_poly_eq(aes(label =  paste(stat(adj.rr.label))),
                formula = y~x, parse = TRUE, 
                label.y = Inf, vjust = 1.3) +
-  scale_x_continuous(trans = 'log10', labels = scales::comma) +
-  scale_y_continuous(trans = 'log10', labels = scales::comma) +
+  #scale_x_continuous(trans = 'log10', labels = scales::comma) +
+  #scale_y_continuous(trans = 'log10', labels = scales::comma) +
   #coord_equal(ratio = 1) +
-  facet_wrap(~Param, scales = 'free', shrink = T) +
   labs(title = 'XgBoost Water Quality Models', subtitle = 'Red line is 1:1')
 
 output.full <- output %>%
-  #filter(log == 'ln') %>%
-  left_join(srMunged, by = c('uniqueID')) %>%
+  left_join(srMunged, by = 'UniqueID') %>%
   mutate(residual = Actual - Predicted,
          year = year(date),
          month = month(date))
+
+##look for errors associated with certain things
+output.full %>% ggplot(., aes(x = residual, y = AOD)) + geom_hex()
 
 ## Some weird hacks for reordering factors
 reorder_within <- function(x, by, within, fun = mean, sep = "___", ...) {
@@ -547,33 +523,6 @@ scale_x_reordered <- function(..., sep = "___") {
   reg <- paste0(sep, ".+$")
   ggplot2::scale_x_discrete(labels = function(x) gsub(reg, "", x), ...)
 }
-# 
-# ## Summary Error metrics
-# ## By actual value quantile
-# errorSum <- output.full %>%
-#   group_by(Param, log) %>%
-#   mutate(quantile = cut_number(Actual, 10, right = F, labels = F),
-#          quantLabs = cut_number(Actual, 10,  right = F, dig.lab = 1)) %>%
-#   ungroup() %>%
-#   group_by(Param, log, quantile, quantLabs) %>%
-#   summarise(rmse = rmse(Actual, Predicted),
-#             #mae = mae(Actual, Predicted),
-#             bias = bias(Actual, Predicted))%>%
-#   gather(rmse:bias, key = 'Metric', value = 'Value') %>%
-#   arrange(Param, log, Metric, quantile) %>%
-#   as.data.frame() %>%
-#   mutate(order = row_number())
-# 
-# ggplot(errorSum, aes(x = reorder_within(quantLabs, quantile, Param), y = Value, color = Metric, linetype = log, group = interaction(Metric, Param, log))) +
-#   geom_point() +
-#   geom_line() +
-#   scale_x_reordered() +
-#   facet_wrap(~Param, scales = 'free') +
-#   theme_bw() +
-#   theme(axis.text.x = element_text(angle = 90, vjust = .5)) +
-#   labs(title = 'Error by In Situ Value binned into 10% Quantiles') +
-#   xlab('Binned Field Obs')
-
 
 ## Summary metrics across space time and observed value
 errorSum <- output.full %>%
@@ -581,11 +530,11 @@ errorSum <- output.full %>%
   mutate(Observed.Value = Actual) %>%
   rename(Year = year, Latitude = lat, Longitude = long) %>%
   gather(Observed.Value, Year, Latitude, Longitude, key = 'Variable', value = 'Value') %>%
-  group_by(Variable, Param, log) %>%
+  group_by(Variable, log) %>%
   mutate(quantile = cut_number(Value, 10, right = F, labels = F),
          quantLabs = cut_number(Value, 10,  right = F, dig.lab = 1)) %>%
   ungroup() %>%
-  group_by(quantile, quantLabs, Param, Variable, log) %>%
+  group_by(quantile, quantLabs, Variable, log) %>%
   dplyr::summarise(mae = mae(Actual, Predicted),
             smape = smape(Actual, Predicted),
             p.bias = percent_bias(Actual, Predicted),
@@ -593,33 +542,30 @@ errorSum <- output.full %>%
             bias = bias(Actual, Predicted)) %>%
   gather(mae:bias, key = 'Metric', value = 'Error') %>%
   as.data.frame() %>%
-  arrange(Param, Variable, quantile) %>%
+  arrange(Variable, quantile) %>%
   mutate(order = row_number())
 
+spaceTimeFigs()
+spaceTimeFigs(abs = F)
 
-spaceTimeFigs('secchi')
-spaceTimeFigs('secchi', abs = F)
-# spaceTimeFigs('chl_a')
-# spaceTimeFigs('chl_a', abs = F)
-# spaceTimeFigs('tss')
-# spaceTimeFigs('tss', abs = F)
-
-xgb_model$modelInfo$varImp(xgb_model$finalModel) %>%
+output.full %>% mutate(yearGroups = cut_number(year, 20)) %>%
+  ggplot(., aes(x = yearGroups, y = residual)) + geom_violin(draw_quantiles = c(.25,.5,.75)) + theme(axis.text.x = element_text(angle = 90, vjust = .5))
+  
+  group_by(yearGroups) %>%
+  summarise(mean.residual = mean(residual),
+            sd.residual = sd(residual)) %>%
+  ggplot(., aes(x = yearGroups, y = mean.residual)) + geom_point() + geom_errorbar(aes(ymin = mean.residual - sd.residual, ymax = mean.residual + sd.residual)) + theme(axis.text.x = element_text(angle = 90, vjust = .5))
+  
+##View the feature importance
+model$modelInfo$varImp(model$finalModel) %>%
   mutate(Feature = fct_reorder(rownames(.), Overall, .desc = T)) %>%
   arrange(Overall) %>%
   ggplot(., aes(x = Feature, y = Overall)) + geom_col() + coord_flip()
-  
-
 ```
 
 
 
 ```{r, fig.height= 8}
-output.full <- output.full %>%
-  filter(Param == 'secchi', log == e$log) %>%
-  st_as_sf(coords = c('long','lat'), crs = 4326) %>% 
-  st_join(region %>% st_transform(.,4326)) 
-
 output.full %>% 
   group_by(sat) %>%
   summarise(mae = mae(Actual, Predicted),
@@ -641,8 +587,7 @@ val.conf <- output.full %>%
             p.bias = sd(p.bias)) %>%
   mutate(p.bias = ifelse(is.na(p.bias), 0, p.bias),
          smape = ifelse(is.na(smape), 0, smape)) %>%
-  gather(smape, p.bias, key = 'Metric', value = 'sd') %>%
-  st_set_geometry(NULL)
+  gather(smape, p.bias, key = 'Metric', value = 'sd')
   
 output.full %>%
   group_by(region, sat, log) %>%
@@ -661,7 +606,10 @@ output.full %>%
   ggtitle('Error by region') +
   facet_wrap(~region, scales = 'free')#, ncol = 4)
 
-ggplot(output.full %>% filter(log == e$log), aes(x = Actual, y = Predicted)) + 
+ggplot(output.full, aes(x = residual, color = sat)) + geom_density() + facet_wrap(~region)
+
+
+ggplot(output.full, aes(x = Actual, y = Predicted)) + 
   geom_point(alpha = .3) +
   geom_smooth(method = 'lm', aes(color = sat)) +
   #scale_fill_viridis(name = 'Point\nCount', trans = 'log10') + 
@@ -675,7 +623,7 @@ ggplot(output.full %>% filter(log == e$log), aes(x = Actual, y = Predicted)) +
   facet_wrap(~region, scales = 'free', shrink = T) +
   labs(title = 'Regional Evaluation Performance')
 
-dummy <- expand.grid(year = seq(1984,2018), month = c(1:12), region = factor(unique(region$region)))
+dummy <- expand.grid(year = seq(1985,2018), month = c(1:12), region = factor(unique(region$region)))
 
 fieldmatch <- output.full %>%
   filter(year < 2019,
@@ -697,108 +645,5 @@ ggplot(fieldmatch %>% na.omit(), aes(date, y = median, color = Measure)) +
   labs(title = 'Smoothed SDD Trends By Region Using Coincident Testing Data') +
   theme_bw() +
   theme(legend.position = 'bottom')
-
-```
-
-### Visual Evalution of ~10 randomly selected lakes
-
-These lakes were removed from train/test data.  The in situ vs satellite data are +/-1 month matchups.  Also, field measurements are coming from a single point whereas RS predictions are based on median reflectance values for the entire lake.
-
-```{r, fig.height = 8}
-## Big plots
-##Read in the data to look
-#ts.full <- read_feather('out/macroSystems/dsweStrictUnGroupedOptvarWeighted_MSxgboostPreds.feather')
-## Take a quick look.
-
-lakesDown <- list.files('out/EvalSites/qaPull', full.names = T)
-
-#Extract vector of empty files' names
-empties <- lakesDown[file.info(lakesDown)[["size"]]==1]
-lakesDown <- lakesDown[!lakesDown %in% empties]
-
-sites.eval <- read_feather('out/evalSites.feather')
-fieldObs <- read_feather('out/evalFieldObs.feather')
-
-# Map over the pulled reflectance values and calculate time-series predictions for each constituent
-ids <- unique(as.character(sites.eval$COMID))
-
-ts.full <-  ids %>% purrr::map_dfr(~EvalPreds(.,lakesDown, sites.eval, 'secchi', log, model = xgb_model$finalModel, features = inputs))
-
-ts.full <- ts.full %>%
-  mutate(source = 'RS',
-         date = as_date(ymd_hms(date)),
-         week = week(date)) %>%
-  select(date, year, week, source, value, parameter, COMID) 
-
-
-fieldObs <- fieldObs %>% 
-  filter(parameter == 'secchi') %>%
-  mutate(date = as_date(ymd_hms(date_unity)),
-  year = year(date),
-  week = week(date),
-  source = 'inSitu') %>%
-  select(date, year, week, source, value, parameter, COMID) %>%
-  filter(year > 1984,
-         !(value > 20 & parameter == 'secchi'))
-
-lagosRS.join <- ts.full %>%
-  bind_rows(fieldObs %>% group_by(date, parameter, COMID, source, week, year) %>%
-              summarise(value = mean(value))) %>%
-  mutate(siteParam = paste0(parameter,'_', COMID),
-         myID = paste0(year(date),month(date), COMID, parameter))
-
-fieldObsdates <- lagosRS.join %>% filter(source == 'inSitu') %>% select(myID)
-
-ts.out <- lagosRS.join %>% filter(myID %in% fieldObsdates$myID)
-
-ggplot(ts.out) + geom_point(aes(x = date, y = value, color = source, shape = parameter), alpha = .7) +
-  geom_smooth(aes(x = date, y = value, linetype = source), method = 'loess', span = .3, se = F) +
-  #scale_color_viridis_d() +
-facet_wrap(~siteParam, scales = 'free', ncol = 4) + 
-  theme(strip.background = element_blank(), strip.text.x = element_blank(), legend.position = 'top') +
-  labs(title = 'Field vs Predicted Observations Over Time')
-
-
-ggplot(ts.out) + geom_density(aes(x = value, fill = source, color = parameter), alpha = .5, size = .7) +
-  scale_color_viridis_d() +
-  facet_wrap(~siteParam, scales = 'free', ncol = 4) + 
-  theme(
-  strip.background = element_blank(),
-  strip.text.x = element_blank(),
-  legend.position = 'top') +
-  labs(title = 'Field vs Predicted Observations Distributions')
-```
-
-
-```{r, eval = F}
-ts.match <- ts.full %>%
-  inner_join(fieldObs, by = c('year', 'week', 'COMID', 'parameter')) %>%
-  rename(date.rs = date.x, date.is = date.y, value.rs = value.x, value.is = value.y) %>%
-  mutate(date.diff = as.numeric(date.rs - date.is),
-         siteParam = paste0(parameter,'_', COMID)) %>%
-  filter(abs(date.diff) < 5)
-
-ggplot(ts.match, aes(x = value.is, y = value.rs)) + 
-  geom_point(aes(color = COMID)) + 
-  geom_abline(color = 'red') + 
-  stat_poly_eq(aes(label =  paste(stat(adj.rr.label))),
-               formula = y~x, parse = TRUE, 
-               label.y = Inf, vjust = 1.3) +
-  scale_x_log10() +
-  scale_y_log10() +
-   theme(
-   legend.position = 'none') +
-  facet_wrap(~parameter, scales = 'free', shrink = T) +
-  labs(title = 'Evaluation Match-Up Data', subtitle = 'Red line is 1:1')
-
-
-check <- fieldObs %>%
-  group_by(date, parameter, COMID) %>%
-  summarise(count = n(),
-            mean = mean(value),
-            sd = sd(value)) %>%
-  na.omit()
-
-ggplot(check, aes(x = mean, y = sd)) + geom_point(aes(color = parameter)) + xlim(0,10) + ylim(0,5) + labs(title = 'Mean and St.Dev of Same-Day in-situ observations')
 ```
 

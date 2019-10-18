@@ -29,31 +29,30 @@ library(plotly)
 library(corrgram)
 library(stlplus)
 library(gganimate)
+library(boot)
+library(trend)
 ```
 
 
 
 ```{r download, eval = F}
 # Bring in all the necessary stoof
-area = 'eco'
-iteration = 'ffs'
-lakeSamp = 'random'
+iteration = 'ffs_ln_Secchi'
+lakeSamp = 'NLA'
+log = 'none'
+region = st_read('in/NLA/NLA_Ecoregions/EcoRegsMerged.shp')
+load(paste0('models/',iteration,'.Rdata'))
+source('0_ModellingFunctions.R')
 
 
 ## Read in lakes sent up to EE
-if(area == 'eco' & lakeSamp == 'NLA'){
+if(lakeSamp == 'NLA'){
   lakes.up <- read_feather('out/lakesNLA2012.feather')
   lakesDown <- list.files('lake_data/NLA2012', full.names = T)
-}else if(area == 'eco' & lakeSamp != 'NLA'){  
-  lakes.up <- read_feather('out/lakesEcoReg500.feather')
-  lakesDown <- list.files('lake_data/EcoReg500', full.names = T) 
-}else{
-  lakes.up <- read_feather('out/lakesHUC2_200_out.feather') %>%
-    rename(COMID = comid,
-           region = REGION)
-  lakesDown <- list.files('lake_data/HUC2_200', full.names = T)
-  }
-
+}else if(lakeSamp != 'EcoReg2000'){  
+  lakes.up <- read_feather('out/lakesEcoReg2000.feather')
+  lakesDown <- list.files('lake_data/EcoReg2000', full.names = T)
+}
 
 #lakesDown <- paste0(getwd(), '/lake_data_HUC2/', files$name)
 
@@ -64,8 +63,7 @@ lakesDown <- lakesDown[!lakesDown %in% empties]
 
 ## Run each lake/parameter combination through the modelling pipeline to create timeseries of predictions.
 
-```{r}
-
+```{r, eval = F}
 #filesUp <- paste0('lake_data/EcoReg500',lakes.up$COMID,'.csv')
 
 #lakesDown <- lakesDown[lakesDown %in% filesUp]
@@ -86,58 +84,40 @@ for(i in lc.files){
       left_join(lc, by = 'COMID')}
 }
 
-dummy <- expand.grid(COMID = unique(lakes.up$COMID), period = c(1,2))
-
-names.in <- names(lake.join)
 
 ## Remove unwanted parameters and munge a couple of date related ones.
 lake.join <- lake.join %>%
-  filter(!is.na(CatAreaSqKm)) %>% #Two lakes missing from LakeCat for some reason
-  select(-c(grep(names.in, pattern = '*Ws', value = T))) %>%
-  left_join(dummy) %>%
-  mutate(COMID = as.factor(COMID),
-         PctImp = ifelse(period == 1, PctImp2006Cat, PctImp2011Cat),
-         PctOw =ifelse(period == 1, PctOw2006Cat, PctOw2011Cat),
-         PctIce = ifelse(period == 1, PctIce2006Cat, PctImp2011Cat),
-         PctUrbOp = ifelse(period == 1, PctUrbOp2006Cat, PctUrbOp2011Cat),
-         PctUrbLo = ifelse(period == 1, PctUrbLo2006Cat, PctUrbLo2011Cat),
-         PctUrbMd = ifelse(period == 1, PctUrbMd2006Cat, PctUrbMd2011Cat),
-         PctUrbHi = ifelse(period == 1, PctUrbHi2006Cat, PctUrbHi2011Cat),
-         PctBl = ifelse(period == 1, PctBl2006Cat, PctBl2011Cat),
-         PctDecid = ifelse(period == 1, PctDecid2006Cat, PctDecid2011Cat),
-         PctConif = ifelse(period == 1, PctConif2006Cat, PctConif2011Cat),
-         PctMxFst = ifelse(period == 1, PctMxFst2006Cat, PctMxFst2011Cat),
-         PctShrb = ifelse(period == 1, PctShrb2006Cat, PctShrb2011Cat),
-         PctGrs = ifelse(period == 1, PctGrs2006Cat, PctGrs2011Cat),
-         PctHay = ifelse(period == 1, PctHay2006Cat, PctHay2011Cat),
-         PctCrop = ifelse(period == 1, PctCrop2006Cat, PctCrop2011Cat),
-         PctWdWet = ifelse(period == 1, PctWdWet2006Cat, PctWdWet2011Cat),
-         PctHbWet = ifelse(period == 1, PctHbWet2006Cat, PctHbWet2011Cat),
-         inStreamCat = factor(inStreamCat)) %>%
-    rowwise() %>%
-    mutate(meanFrstLoss = mean(c(PctFrstLoss2001Cat:PctFrstLoss2013Cat), na.rm = T),
-           meanFrstFire = mean(c(PctFire2000Cat:PctFire2010Cat, na.rm = T))) %>%
-    ungroup() %>%
-  select(-c(PctFire2000Cat:PctFrstLoss2013Cat, PctImp2006Cat, PctImp2011Cat, PctOw2006Cat:PctHbWet2011Cat, Precip08Cat:Tmean09Cat)) 
+  filter(!is.na(CatAreaSqKm)) %>%  ## 
+  select(-c(grep(names.in, pattern = '*Ws', value = T), 
+            grep(names.in, pattern = '2011Cat', value = T),
+            ## 2011 values aren't representative of the study period
+            grep(names.in, pattern = 'PctFire', value = T), 
+            ## While potentially important, the forest metrics lack 
+            grep(names.in, pattern = 'PctFrstLoss', value = T), 
+            ##the temporal resolution we need.
+            grep(names.in, pattern = 'NABD', value = T), 
+            ##Dam info acts as identifiers and are redundant with lake_type/area
+            grep(names.in, pattern = 'Dam', value = T), 
+            ##Dam info acts as identifiers and are redundant with lake_type/area
+            'Precip08Cat', 'Precip09Cat', 'Tmean08Cat', 'Tmean09Cat'))
+            #Use long term averages not these
+#Round the majority of values to the nearest 1 to avoid variables become 'unique ID's)
+round1 <- names(lake.join %>% select(c(CatAreaSqKm:CatPctFull,PctImp2006Cat, PctCarbResidCat:WetIndexCat)))
 
-#Round the majority of values to the nearest 
-round10 <- names(lake.join %>% select(c(vol_total, depth_avg, dis_avg, res_time, slope_100, wshd_area, CatAreaSqKm, PctAg2006Slp20Cat:CompStrgthCat, PctCarbResidCat:PctWaterCat, NABD_NIDStorCat:WetIndexCat, PctImp:meanFrstFire)))
-
-#Round a subset to the nearest 10th because their values more or less range from 0 to 1.
-round.1 <- names(lake.join %>% select(c(lake_area, shore_len, shore_dev, AgKffactCat, KffactCat, MineDensCat, NABD_DensCat)))
+## Round a few to 10 because they're variation is real big and larger values with 
+#Round a subset to the nearest 10th because there values more or less range from 0 to 1.
+round.1 <- names(lake.join %>% select(c(AgKffactCat, KffactCat, MineDensCat)))
 
 lake.join <- lake.join %>%
-  mutate_at(round10, round, digits = -1) %>%
-  mutate_at(round.1, round, digits = 1) %>%
-  mutate(slope_100 = ifelse(slope_100 == -1, -9999, slope_100)) #make consistent no data value
-         
+  mutate_at(round1, round, digits = 0) %>%
+  mutate_at(round.1, round, digits = 1)
 
-if(area == 'eco' & lakeSamp != 'NLA'){
-  write_feather(lake.join, 'out/EcoReg500LakesFull.feather')
-}else if(area == 'eco' & lakeSamp == 'NLA'){
+lake.join[lake.join == -9998] = NA
+
+if(lakeSamp != 'NLA'){
+  write_feather(lake.join, 'out/EcoReg2000LakesFull.feather')
+}else if(lakeSamp == 'NLA'){
   write_feather(lake.join, 'out/NLA2012LakesFull.feather')
-}else{
-  write_feather(lake.join, 'out/Huc2_200LakesFull.feather')
 }
 
 #lake.join <- read_feather('out/EcoReg500LakesFull.feather')
@@ -159,105 +139,311 @@ aodLUT <- function(path){
   return(lut)
 }
 
-cl <- makePSOCKcluster(availableCores() - 4)
 plan(multiprocess)
 lut <- lakesDown %>% future_map_dfr(aodLUT, .progress = T)
 plan(sequential)
-stopCluster(cl)
 
-write_feather(lut, 'out/aodLUT_NLA2012.feather')
-
+#write_feather(lut, 'out/aodLUT_NLA2012.feather')
 ```
 
 
 ```{r}
-if(area == 'eco' & lakeSamp != 'NLA'){
-  lake.join <- read_feather('out/EcoReg500LakesFull.feather')
-}else if(area == 'eco' & lakeSamp == 'NLA'){
-  lake.join <- read_feather('out/NLA2012LakesFull.feather')
-}else{
-  lake.join <- read_feather('out/Huc2_200LakesFull.feather')
-}
-
 ## Bring in all the files needed in the script
 # Landscape variables ranked by RF feature importance
-rfeVars <- read_feather('out/RfeVariablesFull.feather')
-ffsVariables <- read_feather('out/ffsVariablesFull.feather')
-## Test the old model
-#rfeVars <- read_feather('../aquaModel/out/dsweStrict2_100Full_rrFalse_RfeVariables.feather')
+ffsVariables <- read_feather('out/ffsResultsFull.feather')
+features <- ffsVariables[ffsVariables$RMSE == min(ffsVariables$RMSE),] %>%
+  select(-c(nvar, RMSE, SE)) %>%
+  paste(.) %>% .[.!= 'NA']
 
-#Evaluation Sites
-sites.eval <- read_feather('out/evalSites.feather')
-
-#Pull in munged match up data
-srMunged <- read_feather('out/srMunged.feather') %>%
-  mutate(uniqueID = row_number(),
-         siteParam = paste0(COMID, parameter)) %>%
-  filter(!COMID %in% sites.eval$COMID)
-
-# Set the arguments
-#dsweStrict_100FullWinSD
-iteration = 'ffs'
-numAdd = -9999
-cons <- c('secchi', 'tss', 'chl_a')
-inputs <- c(str_split(ffsVariables$var, ', ')[[1]])
-log = 'ln'
-filter <- T
-weight <- F
-ungroup <- T
-area = 'eco'
-e = environment()
-load('models/ffs_ln_secchi.Rdata')
-
-source('0_ModellingFunctions.R')
-
-if(area == 'eco'){
-  ids <-list.files('lake_data/EcoReg500') %>% strsplit(split = '.csv', fixed = T) %>% unlist()
-  }else{ids <- list.files('lake_data/HUC2_200') %>%strsplit(split = '.csv', fixed = T) %>% unlist()
-  ids <- ids[ids %in% lake.join$COMID]
+if(lakeSamp == 'NLA'){
+  lake.join <- read_feather('out/NLA2012LakesFull.feather')
+  ids <-list.files('lake_data/NLA2012') %>% strsplit(split = '.csv', fixed = T) %>% unlist()
+  lakesDown <- list.files('lake_data/NLA2012', full.names = T)
+  }else if(lakeSamp == 'EcoReg2000'){
+    lake.join <- read_feather('out/EcoReg2000LakesFull.feather')
+    ids <- list.files('lake_data/EcoReg2000') %>%strsplit(split = '.csv', fixed = T) %>% unlist()
+    lakesDown <- list.files('lake_data/EcoReg2000', full.names = T)
   }
 
-#ids <- unique(as.character(lake.join$COMID))[] 
 
 plan(multiprocess(workers = availableCores()-4))
 
-Preds.out <-  ids %>% future_map_dfr(~EvalPreds(id = .,paths = lakesDown, sites.eval = lake.join, param = 'secchi', log = log, eval = F, version = 'new', model = xgb_model$finalModel, features = inputs ))
+Preds.out <-  ids %>% future_map_dfr(~EvalPreds(id = .,paths = lakesDown, lakesUp = lake.join, log = log, model = model, features = features, lakeSamp = lakeSamp), .progress = T)
   #bind_rows(ids %>% future_map_dfr(~EvalPreds(.,lakesDown, lake.join, 'tss', log, eval = F, version = 'new'))) %>%
   #bind_rows(ids %>% future_map_dfr(~EvalPreds(.,lakesDown, lake.join, 'chl_a', log, eval = F, version = 'new')))
 
 plan(sequential)
 
-write_feather(Preds.out, paste0('out/TS_Predictions_',iteration,'_',area,'.feather'))
-#Preds.out <- read_feather(paste0('out/TS_Predictions_',iteration,'.feather'))
+
+write_feather(Preds.out, paste0('out/TS_Preds/TS_Predictions_',iteration,'.feather'))
+Preds.out.noScan <- read_feather(paste0('out/TS_Preds/TS_Predictions_dWL_ln_NoScalLine_Secchi.feather'))
 ```
 
 
 ## Explore the data a bit.
 
 ```{r}
-if(area == 'eco'){
-  region = st_read('in/NLA/NLA_Ecoregions/EcoRegsMerged.shp')
-}else if(area == 'hucs'){
-  region = st_read('in/hucs/hucs.shp') %>%
-          mutate(HUC_2 = factor(as.numeric(HUC_2))) %>%
-          group_by(HUC_2) %>%
-          summarize(region = first(REGION))
-}
+Preds.out.l8 <- Preds.out
 
 ## Take a quick look at mean trends in each HUC2
+
+#How many lakes failed? The way the code is written we'll have 1 row of NA's for each lake that failed
+colSums(is.na(Preds.out)) ##Only 39 out of ~2.5k, not bad
+
+##Look at summer median values
 Preds.out%>%
+  left_join(lake.join %>% select(COMID, areasqkm)) %>%
+  mutate(sizeClass = ifelse(areasqkm > 100,'big','small')) %>%
   na.omit() %>%
-  group_by(year, region, parameter) %>%
+  filter(month %in% c(5:9), sizeClass == 'big') %>%
+  group_by(year, region, sizeClass) %>%
+  summarise(value = median(value)) %>%
+  ggplot(., aes(x = year, y = value, color = region, shape = sizeClass)) +
+  geom_line() +
+  geom_point() +
+  geom_vline(xintercept = 1999) +
+  labs(y = 'SDD (m)', title = 'SDD by HUC2 over time')
+
+
+##Quick Comp of just l5 to pull sat stack
+#Preds.out %>% mutate(stack = 'NoScal') %>%
+  #
+Preds.out.sat %>% mutate(stack = 'sat') %>%
+  bind_rows(Preds.out.noScan %>% mutate(stack = 'noScan'))%>%
+  bind_rows(Preds.out.sat %>% mutate(stack = 'sat')) %>%
+  bind_rows(Preds.out.Nosat %>% mutate(stack = 'Nosat')) %>%
+  na.omit() %>%
+  filter(month %in% c(5:9)) %>%
+  group_by(year, region, stack) %>%
   summarise(value = mean(value)) %>%
-  ggplot(., aes(x = year, y = value, color = region)) +
-  geom_smooth(se = F, span = .1) +
-  #geom_point() +
+  ggplot(., aes(x = year, y = value, color = region, shape = stack)) +
+  geom_line() +
+  geom_point() +
+  geom_vline(xintercept = 1999) +
   labs(y = 'SDD (m)', title = 'SDD by HUC2 over time') +
-  facet_wrap(~parameter, scales = 'free')
+  scale_y_continuous(limits = c(.5,1.5))
 
-check <- read.csv(list.files('lake_data/EcoReg500', full.names = T)[1])
-head(check)
+#Create dataframe of median summer values for each lake plus a mk-test stats
+summ.meds <- Preds.out %>%
+  left_join(lake.join %>% select(COMID, areasqkm)) %>%
+  mutate(sizeClass = ifelse(areasqkm > 100,'big','small')) %>%
+  filter(month %in% c(5:9)) %>%
+  group_by(COMID, year, region, sizeClass) %>%
+  summarise(secchi.med = median(value))
 
+##Check how many years we have obs we have for each lake on only take lakes with > 10 years of obs. We loose ~500 lakes.
+counts <- summ.meds %>%
+  group_by(COMID) %>%
+  summarise(count = n()) %>%
+  filter(count > 25) %>%
+  left_join(lake.join) %>% filter()
+
+## Take a look at a couple individual lakes out of curiosity
+
+####  Create wide dataset 
+summ.meds.wide <- summ.meds %>%
+  filter(COMID %in% counts$COMID) %>%
+  spread(year, secchi.med)
+
+##Check regional counts to make sure they're reasonable
+summ.meds.wide %>% group_by(region, sizeClass) %>% summarise(count = n())
+
+##Apply 1000 rounds of bootstrapping to yearly summer medians
+#Generate the bootsrap function
+boot.med <- function(data, indices){
+  dt<-data[indices,] %>% mutate(dummy = 'dummy')
+  
+  meds <- dt %>% group_by(dummy) %>% 
+    summarise_at(vars(`1984`:`2019`), median, na.rm = T) %>%
+    select(-dummy)
+  c(as.numeric(paste(meds[1,])))
+}
+
+## Create a follow up function to pull the mean and se (sd) of bootstrap iterations
+boot.summary<- function(boots){
+  summary <- tibble(mean = colMeans(boots$t),
+  se = apply(boots$t,2,sd),
+  bias = colMeans(boots$t) - boots$t0,
+  year = c(1984:2019))
+  return(summary)
+}
+
+## Map over the regions and pull out summary stats
+bootstrapped.ts <- summ.meds.wide %>%
+  group_by(region, sizeClass) %>%
+  nest() %>%
+  mutate(boot.meds= purrr::map(data, ~boot(.,boot.med, R = 1000)),
+         boots.summ = purrr::map(boot.meds, boot.summary)) %>%
+  select(-boot.meds, -data) %>%
+  unnest(boots.summ)
+
+bootstrapped.ts %>%
+  filter(year < 2019, year > 1984) %>%
+  ggplot(., aes(x = year, y = mean)) +
+  geom_errorbar(aes(ymin = mean - se, ymax = mean + se), color = 'grey60', alpha = .4) +
+  geom_path(color = 'red') +
+  theme_bw() +
+  geom_vline(xintercept = 2012) +
+  geom_point() +
+  facet_wrap(~region, scales = 'free', ncol = 2) +
+  labs(title = 'Mean and 90% confidence bound (stability)')
+
+#####Look at MK stats for for each region.
+summaryMK <- bootstrapped.ts %>%
+  group_by(region, sizeClass) %>%
+  arrange(year) %>%
+  nest() %>%
+  mutate(mk = purrr::map(data, ~sens.slope(.$mean)),
+         sen.slope = purrr::map_dbl(mk, 'estimates'),
+         sen.slope = sen.slope*100,
+         p.value = purrr::map_dbl(mk, 'p.value'),
+         p.value = round(p.value, 5)) %>%
+  select(-data)
+
+#####Look at MK stats for for each region.
+sizeMK <- Preds.out %>% 
+  left_join(lake.join %>% select(COMID, areasqkm)) %>%
+  group_by(region) %>%
+  mutate(sizeClass = cut_number(areasqkm, 5, labels = F)) %>%
+  ungroup() %>%
+  filter(month %in% c(5:9)) %>%
+  group_by(year, region, sizeClass) %>%
+  summarise(value = median(value)) %>%
+  group_by(region, sizeClass) %>%
+  arrange(year) %>%
+  nest() %>%
+  mutate(mk = purrr::map(data, ~sens.slope(.$value)),
+         sen.slope = purrr::map_dbl(mk, 'estimates'),
+         sen.slope = sen.slope*100,
+         p.value = purrr::map_dbl(mk, 'p.value'),
+         p.value = round(p.value, 5)) %>%
+  select(-data) 
+
+ggplot(sizeMK, aes(x = region, y = sen.slope, color = sizeClass)) + geom_point()
+  
+##Write a function to pull out man-kendall trends and slopes to connect with the wide data for bootsrapping
+mk <- summ.meds %>% filter(COMID %in% counts$COMID) %>% 
+  group_by(COMID, region) %>%
+  arrange(year) %>%
+  nest() %>%
+  mutate(mk = purrr::map(data, ~sens.slope(.$secchi.med)),
+         sen.slope = purrr::map_dbl(mk, 'estimates'),
+         sen.slope = sen.slope*100,
+         p.value = purrr::map_dbl(mk, 'p.value')) %>%
+  select(COMID, region, sen.slope, p.value)
+
+
+
+##Now bootstrap over the trend statistics
+##Apply 1000 rounds of bootstrapping to yearly summer medians
+#Generate the bootsrap function
+boot.trend <- function(data, indices){
+  dt<-data[indices,] %>% mutate(dummy = 'dummy')
+  meds <- dt %>% group_by(dummy) %>% 
+    summarise_at(vars(sen.slope, p.value), mean, na.rm = T) %>%
+    select(-dummy)
+  c(as.numeric(paste(meds[1,])))
+}
+
+## Create a follow up function to pull the mean and se (sd) of bootstrap iterations
+boot.trend.summary<- function(boots){
+  summary <- tibble(mean = colMeans(boots$t),
+  se = apply(boots$t,2,sd),
+  bias = colMeans(boots$t) - boots$t0,
+  unit = c('sen.slope','p.value'))
+  return(summary)
+}
+
+bootstrapped.trend <- mk %>%
+  group_by(region) %>%
+  nest() %>%
+  mutate(boot.meds= purrr::map(data, ~boot(., boot.trend, R = 1000)),
+         boots.summ = purrr::map(boot.meds, boot.trend.summary)) %>%
+  select(-boot.meds, -data) %>%
+  unnest(boots.summ)
+
+
+
+```
+
+NLA Comparison
+
+```{r}
+nla.2007 <- read.csv('in/NLA/nla2007_secchi_20091008.txt', stringsAsFactors = F) %>%
+  select(SITE_ID, secchi = SECMEAN, date = DATE_SECCHI) %>%
+  left_join(read.csv('in/NLA/nla2007_sampledlakeinformation_20091113.txt') %>%
+              select(SITE_ID, COMID = COM_ID, region = WSA_ECO9, 
+                     lat = LAT_DD, long = LON_DD))
+
+nla.2012 <- read.csv('in/NLA/nla2012_secchi_08232016.txt', stringsAsFactors = F) %>%
+  select(SITE_ID, secchi = SECCHI, date = DATE_COL) %>%
+  left_join(read.csv('in/NLA/nla2012_wide_siteinfo_08232016.txt') %>%
+              select(SITE_ID, COMID = COMID2012, region = AGGR_ECO9_2015, 
+                     lat = LAT_DD83, long = LON_DD83))
+
+nlaFull <- nla.2007 %>%
+  mutate(nla.year = 2007) %>%
+  bind_rows(nla.2012 %>% mutate(nla.year = 2012)) %>%
+  mutate(date = mdy(date),
+         year = year(date),
+         month = month(date),
+         region = factor(region, 
+                         labels = c("Coastal Plain", "Northern Appalachians", "Northern Plains", "Southern Appalachians", "Southern Plains", "Temperate Planes", "Upper Midwest","Western Mountains","Xeric West"))) %>%
+  group_by(SITE_ID, region, nla.year) %>%
+  summarise(secchi = median(secchi, na.rm = T)) %>%
+  group_by(region, nla.year) %>%
+  rename(year = nla.year) %>%
+  summarise(secchi.mean = mean(secchi, na.rm = T),
+            secchi.median = median(secchi, na.rm = T),
+            secchi.sd = sd(secchi, na.rm =T)) %>%
+  mutate(source = 'NLA')
+
+predComp <- Preds.out %>% 
+  mutate(source = 'Sat') %>%
+  # bind_rows(Preds.out.sat %>% mutate(source = 'sat')) %>%
+  # bind_rows(Preds.out.Nosat %>% mutate(source = 'noSat')) %>%
+  na.omit() %>%
+  filter(month %in% c(5:9), year %in% c(2007,2012)) %>%
+  group_by(year, region, source) %>%
+  summarise(secchi.mean = mean(value, na.rm = T),
+            secchi.median = median(value, na.rm = T),
+            secchi.sd = sd(value, na.rm =T)) %>%
+  bind_rows(nlaFull)
+
+ggplot(predComp %>% filter(source %in% c('Sat', 'NLA')), aes(x = region, color = source)) +
+  geom_point(aes(y = secchi.mean)) +
+  geom_errorbar(aes(ymin = secchi.mean - secchi.sd, ymax = secchi.mean + secchi.sd)) +
+  scale_color_viridis_d(end = .7) +
+  facet_wrap(~year) +
+  theme_bw() +
+  theme(axis.text.x = element_text(angle = 90, hjust = 1)) +
+  labs(x = 'Region', y = 'Water Clarity (m)', title = 'Comparison of NLA to Remotely Sensed Predictions')
+
+predComp <- Preds.out %>% filter(year %in% c(2007,2012),
+                                 month %in% c(5:9)) %>%
+  select(region, secchi = value, year) %>%
+  mutate(source = 'RS') %>%
+  bind_rows(nla.2007 %>% select(region, secchi) %>%
+              mutate(source = 'NLA', year = 2007)) %>%
+  bind_rows(nla.2012 %>% select(region, secchi) %>%
+              mutate(source = 'NLA', year = 2012))
+
+ggplot(predComp, aes(x = region, y = secchi, color = source)) + 
+  geom_violin()  + 
+  scale_color_viridis_d(end = .6) +
+  scale_y_continuous(limits = c(0,10)) +
+  facet_wrap(~year, ncol = 2) +
+  theme_bw() +
+  theme(axis.text.x = element_text(angle = 90, hjust = 1))
+        
+        
+```
+
+
+```{r}
+check = srMunged %>%group_by(COMID) %>% summarise(count = n()) %>% arrange(desc(count))
+
+srMunged %>% filter(COMID == check$COMID[2], year > 1999, year < 2013) %>% ggplot(., aes(x = red, color = sat)) + geom_density()
 
 ```
 

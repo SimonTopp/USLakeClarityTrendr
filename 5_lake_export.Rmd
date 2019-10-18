@@ -83,13 +83,14 @@ NLAsample <- nhd.join %>% filter(COMID %in% nlaSamp$COMID2012) %>%
 st_write(NLAsample, 'out/sampleLakes/NLA2012.shp')
 st_write(sample, 'out/sampleLakes/EcoReg2000.shp')
 
-#check <- st_read('out/sampleLakes/lakesHUC2_200.shp')
+
+# sample <- st_read('out/sampleLakes/EcoReg2000.shp')
 # write_feather(sample %>%
 #                 st_centroid(.) %>%
 #                 st_transform(crs = 4326) %>%
 #                 rowwise() %>%
 #                 mutate(lat = geometry[2],
-#                        long = geometry[1]) %>% as.data.frame() %>% select(-geometry), 'out/lakesNLA2012.feather')
+#                        long = geometry[1]) %>% as.data.frame() %>% select(-geometry), 'out/lakesEcoReg2000.feather')
 
 lakes.join.out <- read_feather('out/lakesNLA2012.feather')
 

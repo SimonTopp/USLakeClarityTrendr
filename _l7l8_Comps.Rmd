@@ -34,12 +34,11 @@ ls78 <- files %>%
   as_tibble() %>%
   rowwise() %>%
   mutate(hue = rgb2hsv(r=red, g=green, b=blue, maxColorValue = 2000)[1],
-         saturation = rgb2hsv(r=red, g=green, b=blue, maxColorValue = 2000)[2],
-         brightness = rgb2hsv(r=red,g= green, b= blue, maxColorValue = 2000)[3],
-         blue = ifelse(sat == '8',0.8667114*blue + 123.16116, blue),
-         nir = ifelse(sat == '8', 1.01621*nir + 99.28166, nir),
-         red = ifelse(sat == '8', 0.9346232*red + 83.54783, red),
-         green = ifelse(sat == '8', 0.8975912*green + 101.77444, green),
+         
+         # blue = ifelse(sat == '8',0.8667114*blue + 123.16116, blue),
+         # nir = ifelse(sat == '8', 1.01621*nir + 99.28166, nir),
+         # red = ifelse(sat == '8', 0.9346232*red + 83.54783, red),
+         # green = ifelse(sat == '8', 0.8975912*green + 101.77444, green),
          NR = nir/red,
          BR = blue/red,
          GR = green/red,
@@ -68,7 +67,9 @@ ls78_wide <- ls78_long %>%
   spread(sat, value)
 
 library(plotly)
-ggplotly(ggplot(ls78_wide %>% filter(band == 'fui.hue'), aes(x = l7, y = l8, color = ID)) + geom_point() + geom_abline())
+ggplot(ls78_wide %>% filter(band == 'fui.hue'), aes(x = l7, y = l8, color = ID)) + geom_point() + geom_abline() + stat_poly_eq(aes(label =  paste(stat(adj.rr.label))),
+               formula = y~x, parse = TRUE, 
+               label.y = Inf, vjust = 1.3)
 
 
 

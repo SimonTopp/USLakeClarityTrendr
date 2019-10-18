@@ -219,7 +219,7 @@ summary(lakeCat.munged)
 site.data.full <- centerJoin %>% left_join(lakeCat.munged)
 
 #write_feather(site.data.full %>% as.data.frame() %>% select(-geometry), 'out/siteInfoFull.feather')
-
+site.data.full <- read_feather('out/siteInfoFull.feather')
 ```
 
 # Check for duplicates between lagos and wqp now that we have lakes linked to SiteIDs
@@ -304,26 +304,7 @@ munger <- function(df, param, dswe = 1, dswe.sd = 0, minPix = 8, maxClouds = 50,
            date_unity = ymd_hms(date_unity),
            month = month(date),
            year = year(date),
-           sat = factor(sat),
-           ##Corect based on simple linear regs (see _l7l8_Comps.Rmd)
-           nir = ifelse(sat == '8', 1.01621*nir + 99.28166, nir), 
-           red = ifelse(sat == '8', 0.9346232*red + 83.54783, red),
-           blue = ifelse(sat == '8',0.8667114*blue + 123.16116, blue),
-           green = ifelse(sat == '8', 0.8975912*green + 101.77444, green),
-           NR = nir/red,
-           BR = blue/red,
-           GR = green/red,
-           NR = nir/red,
-           SR = swir1/red,
-           BG = blue/green,
-           BN = blue/nir,
-           BS = blue/swir1,
-           GS = green/swir1,
-           GN = green/nir,
-           fai = nir - (red + (swir1-red)*((830-660)/(1650-660))),
-           ndvi = ((nir-red)/(nir+red)),
-           ndwi = ((green- swir1)/(green + swir1)),
-           dWL = fui.hue(red, green, blue)) %>%
+           sat = factor(sat)) %>%
     select(-c(system.index, pixelCount, qa, qa_sd, date_only)) 
 return(data)
 }
@@ -343,12 +324,15 @@ munged <- sr %>%
   distinct(COMID, value, parameter, landsat_id, date, lat, long, .keep_all = T) %>% #remove duplicate values (see workflow at line ~200)
 ## Finally, tag on Aerosol Optical Depth from the MERRA-2 Reanalysis
   rowwise() %>%
-  mutate(AOD = pullMerra(date = date, lat = lat, long =long)) %>%
+  #mutate(AOD = pullMerra(date = date, lat = lat, long =long)) %>%
   ungroup() %>%
   select(-.geo)
   ##Join to NLA EcoRegions
-munged <- munged %>% select(-geometry)
-write_feather(munged, 'out/srMunged.feather')
+munged <- munged %>% 
+  #select(-geometry) %>%
+  rename_at(vars(FDATE:LakeArea), tolower) ##Because of previous framework.
+#write_feather(munged, 'out/srMunged.feather')
+#munged <- read_feather('out/srMunged.feather')
 ```
 
 ##Take a look at the dist and count of the final
