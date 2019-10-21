@@ -354,3 +354,65 @@ ggplot() +
 ggsave('figures/MungedOverpasses.png', width = 7.5, height = 6, units = 'in', dpi = 300)
 
 ```
+
+```{r}
+## Finally, we need to standardize our reflectance values
+
+##Filter to just the observations we'll use for the actual analysis.
+lsComps <- read_feather('out/srMunged.feather') %>%
+  filter(parameter == 'secchi',
+         value <= 10,
+         !is.na(CatAreaSqKm)) %>%
+  mutate(NR = nir/red,
+         BG = blue/green,
+         dWL = fui.hue(red, green, blue))
+
+
+##First, compare landsat 5 to landsat 7.  We'll limit the comparison to coincident dates when both satellites were in the air.  Theoretically these distributions should be the same.
+lsComps %>% filter(year > 1999, year < 2012) %>% gather(red, blue, green, nir, NR, BG, dWL, key = 'Band', value = 'value') %>%
+  ggplot(., aes(x = value, color = sat)) + geom_density() + facet_wrap(~Band, scales = 'free') 
+
+
+## Calculate differences between 5 and 7
+lsComps %>% filter(year > 1999, year < 2012) %>% gather(red, blue, green, nir, NR, BG, dWL, key = 'Band', value = 'value') %>%
+  group_by(sat, Band) %>%
+  summarise(med = median(value)) %>%
+  spread(sat, med) %>%
+  mutate(satDiff = `7` - `5`)
+
+## Now look at differences between 7 and 8.  Similarly, we'll limit this to only coincident time periods
+lsComps %>% filter(year > 2012) %>% gather(red, blue, green, nir, NR, BG, dWL, key = 'Band', value = 'value') %>%
+  ggplot(., aes(x = value, color = sat)) + geom_density() + facet_wrap(~Band, scales = 'free') 
+
+lsComps %>% filter(year > 2012) %>% gather(red, blue, green, nir, NR, BG, dWL, key = 'Band', value = 'value') %>%
+  group_by(sat, Band) %>%
+  summarise(med = median(value)) %>%
+  spread(sat, med) %>%
+  mutate(satDiff = `7` - `8`)
+
+## Apply bias correction to 5 and 8 to standardize them to 7 and look at the distributions again
+lsComps <- read_feather('out/srMunged.feather') %>%
+  filter(parameter == 'secchi',
+         value <= 10,
+         !is.na(CatAreaSqKm)) %>%
+  mutate(nir = ifelse(sat == '5', nir - 58, ifelse(sat == '8', nir + 83, nir)),
+         red = ifelse(sat == '5', red - 38, ifelse(sat == '8', red + 33, red)),
+         blue = ifelse(sat == '5', blue - 9, ifelse(sat == '8', blue + 45, blue)),
+         green = ifelse(sat == '5', green - 36, ifelse(sat == '8', green + 29, green)),
+         NR = nir/red,
+         BG = blue/green,
+         dWL = fui.hue(red, green, blue))
+
+#5 and 7
+lsComps %>% filter(year > 1999, year < 2012) %>% gather(red, blue, green, nir, NR, BG, dWL, key = 'Band', value = 'value') %>%
+  ggplot(., aes(x = value, color = sat)) + geom_density() + facet_wrap(~Band, scales = 'free') 
+#7 and 8
+lsComps %>% filter(year > 2012) %>% gather(red, blue, green, nir, NR, BG, dWL, key = 'Band', value = 'value') %>%
+  ggplot(., aes(x = value, color = sat)) + geom_density() + facet_wrap(~Band, scales = 'free') 
+#Overall
+lsComps %>% gather(red, blue, green, nir, NR, BG, dWL, key = 'Band', value = 'value') %>%
+  ggplot(., aes(x = value, color = sat)) + geom_density() + facet_wrap(~Band, scales = 'free') 
+
+## They look way better
+```
+

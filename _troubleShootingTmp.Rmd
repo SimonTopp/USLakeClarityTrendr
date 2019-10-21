@@ -682,7 +682,10 @@ srMunged %>%
                formula = y~x, parse = TRUE, 
                label.y = Inf, vjust = 1.3)
   
-cor(srMunged$dWL[srMunged$year %in% c(1992,1993)], srMunged$AOD[srMunged$year %in% c(1992,1993)]) %>%
+cor(srMunged$GR[srMunged$year %in% c(1992,1993)], srMunged$AOD[srMunged$year %in% c(1992,1993)])
+cor(srMunged$GN, srMunged$AOD, use = 'complete.obs')
+
+#%>%
   kable(caption = 'Correlation between BR and AOD only during 92-93') %>% kable_styling()
 
 

@@ -13,26 +13,15 @@ EvalPreds <- function(id, paths, lakesUp, log, model, features, lakeSamp){
       inner_join(lakesUp %>% mutate(COMID = as.character(COMID))) %>%
       distinct(.keep_all = T)
     
-    pix.cut <- max(df$pixelCount)/3  #anything less than have the number of max lake pixels get rid up as shoddy
-    
+    pix.cut <- max(df$pixelCount)/3  ##Filter any observation that doesn't capture at least 1/3 of the lake.
+
     df <- df %>%
-      mutate(nir = ifelse(sat == '8', 1.01621*nir + 99.28166, nir), 
-             red = ifelse(sat == '8', 0.9346232*red + 83.54783, red),
-             blue = ifelse(sat == '8',0.8667114*blue + 123.16116, blue),
-             green = ifelse(sat == '8', 0.8975912*green + 101.77444, green),
+      mutate(nir = ifelse(sat == '5', nir - 58, ifelse(sat == '8', nir + 83, nir)),
+             red = ifelse(sat == '5', red - 38, ifelse(sat == '8', red + 33, red)),
+             blue = ifelse(sat == '5', blue - 9, ifelse(sat == '8', blue + 45, blue)),
+             green = ifelse(sat == '5', green - 36, ifelse(sat == '8', green + 29, green)),
              NR = nir/red,
-             BR = blue/red,
-             GR = green/red,
-             NR = nir/red,
-             SR = swir1/red,
              BG = blue/green,
-             BN = blue/nir,
-             BS = blue/swir1,
-             GS = green/swir1,
-             GN = green/nir,
-             fai = nir - (red + (swir1-red)*((830-660)/(1650-660))),
-             ndvi = ((nir-red)/(nir+red)),
-             ndwi = ((green- swir1)/(green + swir1)),
              dWL = fui.hue(red, green, blue),
              sat = factor(sat, levels = c('5','7','8')),
              #date = ymd_hms(date),

@@ -218,11 +218,11 @@ print('done')
 # Download files to local directory
 
 ```{r}
-files <- drive_ls('aquaModel_lakesNLA2012')
-files <- files %>% filter(!name %in% list.files('lake_data/NLA2012'))
+files <- drive_ls('aquaModel_lakesEcoReg2000')
+files <- files %>% filter(!name %in% list.files('lake_data/EcoReg2000'))
 
 for(i in c(1:nrow(files))){
-  path <- paste0('lake_data/NLA2012/',files$name[i])
+  path <- paste0('lake_data/EcoReg2000/',files$name[i])
   drive_download(as_id(files$id[i]), path, overwrite = T)
 }
 

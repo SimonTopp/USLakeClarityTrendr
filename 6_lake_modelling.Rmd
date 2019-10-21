@@ -37,9 +37,9 @@ library(trend)
 
 ```{r download, eval = F}
 # Bring in all the necessary stoof
-iteration = 'ffs_ln_Secchi'
+iteration = 'FFS_DistNorm_noLn_Secchi'
 lakeSamp = 'NLA'
-log = 'none'
+log = F
 region = st_read('in/NLA/NLA_Ecoregions/EcoRegsMerged.shp')
 load(paste0('models/',iteration,'.Rdata'))
 source('0_ModellingFunctions.R')
@@ -49,7 +49,7 @@ source('0_ModellingFunctions.R')
 if(lakeSamp == 'NLA'){
   lakes.up <- read_feather('out/lakesNLA2012.feather')
   lakesDown <- list.files('lake_data/NLA2012', full.names = T)
-}else if(lakeSamp != 'EcoReg2000'){  
+}else if(lakeSamp == 'EcoReg2000'){  
   lakes.up <- read_feather('out/lakesEcoReg2000.feather')
   lakesDown <- list.files('lake_data/EcoReg2000', full.names = T)
 }
@@ -84,7 +84,7 @@ for(i in lc.files){
       left_join(lc, by = 'COMID')}
 }
 
-
+names.in <- names(lake.join)
 ## Remove unwanted parameters and munge a couple of date related ones.
 lake.join <- lake.join %>%
   filter(!is.na(CatAreaSqKm)) %>%  ## 
@@ -175,16 +175,14 @@ Preds.out <-  ids %>% future_map_dfr(~EvalPreds(id = .,paths = lakesDown, lakesU
 plan(sequential)
 
 
-write_feather(Preds.out, paste0('out/TS_Preds/TS_Predictions_',iteration,'.feather'))
-Preds.out.noScan <- read_feather(paste0('out/TS_Preds/TS_Predictions_dWL_ln_NoScalLine_Secchi.feather'))
+write_feather(Preds.out, paste0('out/TS_Preds/', lakeSamp, '_',iteration,'.feather'))
+#Preds.out<- read_feather(paste0('out/TS_Preds/TS_Predictions_',iteration,'.feather'))
 ```
 
 
 ## Explore the data a bit.
 
 ```{r}
-Preds.out.l8 <- Preds.out
-
 ## Take a quick look at mean trends in each HUC2
 
 #How many lakes failed? The way the code is written we'll have 1 row of NA's for each lake that failed
@@ -195,50 +193,27 @@ Preds.out%>%
   left_join(lake.join %>% select(COMID, areasqkm)) %>%
   mutate(sizeClass = ifelse(areasqkm > 100,'big','small')) %>%
   na.omit() %>%
-  filter(month %in% c(5:9), sizeClass == 'big') %>%
-  group_by(year, region, sizeClass) %>%
-  summarise(value = median(value)) %>%
-  ggplot(., aes(x = year, y = value, color = region, shape = sizeClass)) +
+  filter(month %in% c(5:9)) %>%
+  group_by(year, region) %>%
+  summarise(value = mean(value)) %>%
+  ggplot(., aes(x = year, y = value, color = region)) +
   geom_line() +
   geom_point() +
   geom_vline(xintercept = 1999) +
   labs(y = 'SDD (m)', title = 'SDD by HUC2 over time')
 
-
-##Quick Comp of just l5 to pull sat stack
-#Preds.out %>% mutate(stack = 'NoScal') %>%
-  #
-Preds.out.sat %>% mutate(stack = 'sat') %>%
-  bind_rows(Preds.out.noScan %>% mutate(stack = 'noScan'))%>%
-  bind_rows(Preds.out.sat %>% mutate(stack = 'sat')) %>%
-  bind_rows(Preds.out.Nosat %>% mutate(stack = 'Nosat')) %>%
-  na.omit() %>%
-  filter(month %in% c(5:9)) %>%
-  group_by(year, region, stack) %>%
-  summarise(value = mean(value)) %>%
-  ggplot(., aes(x = year, y = value, color = region, shape = stack)) +
-  geom_line() +
-  geom_point() +
-  geom_vline(xintercept = 1999) +
-  labs(y = 'SDD (m)', title = 'SDD by HUC2 over time') +
-  scale_y_continuous(limits = c(.5,1.5))
-
 #Create dataframe of median summer values for each lake plus a mk-test stats
 summ.meds <- Preds.out %>%
-  left_join(lake.join %>% select(COMID, areasqkm)) %>%
-  mutate(sizeClass = ifelse(areasqkm > 100,'big','small')) %>%
   filter(month %in% c(5:9)) %>%
-  group_by(COMID, year, region, sizeClass) %>%
+  group_by(COMID, year, region) %>%
   summarise(secchi.med = median(value))
 
 ##Check how many years we have obs we have for each lake on only take lakes with > 10 years of obs. We loose ~500 lakes.
 counts <- summ.meds %>%
   group_by(COMID) %>%
   summarise(count = n()) %>%
-  filter(count > 25) %>%
-  left_join(lake.join) %>% filter()
-
-## Take a look at a couple individual lakes out of curiosity
+  filter(count > 15) %>%
+  left_join(lake.join)
 
 ####  Create wide dataset 
 summ.meds.wide <- summ.meds %>%
@@ -246,7 +221,7 @@ summ.meds.wide <- summ.meds %>%
   spread(year, secchi.med)
 
 ##Check regional counts to make sure they're reasonable
-summ.meds.wide %>% group_by(region, sizeClass) %>% summarise(count = n())
+summ.meds.wide %>% group_by(region) %>% summarise(count = n())
 
 ##Apply 1000 rounds of bootstrapping to yearly summer medians
 #Generate the bootsrap function
@@ -254,7 +229,7 @@ boot.med <- function(data, indices){
   dt<-data[indices,] %>% mutate(dummy = 'dummy')
   
   meds <- dt %>% group_by(dummy) %>% 
-    summarise_at(vars(`1984`:`2019`), median, na.rm = T) %>%
+    summarise_at(vars(`1984`:`2019`), mean, na.rm = T) %>%
     select(-dummy)
   c(as.numeric(paste(meds[1,])))
 }
@@ -270,7 +245,7 @@ boot.summary<- function(boots){
 
 ## Map over the regions and pull out summary stats
 bootstrapped.ts <- summ.meds.wide %>%
-  group_by(region, sizeClass) %>%
+  group_by(region) %>%
   nest() %>%
   mutate(boot.meds= purrr::map(data, ~boot(.,boot.med, R = 1000)),
          boots.summ = purrr::map(boot.meds, boot.summary)) %>%
@@ -283,14 +258,14 @@ bootstrapped.ts %>%
   geom_errorbar(aes(ymin = mean - se, ymax = mean + se), color = 'grey60', alpha = .4) +
   geom_path(color = 'red') +
   theme_bw() +
-  geom_vline(xintercept = 2012) +
   geom_point() +
   facet_wrap(~region, scales = 'free', ncol = 2) +
   labs(title = 'Mean and 90% confidence bound (stability)')
 
 #####Look at MK stats for for each region.
 summaryMK <- bootstrapped.ts %>%
-  group_by(region, sizeClass) %>%
+  na.omit() %>%
+  group_by(region) %>%
   arrange(year) %>%
   nest() %>%
   mutate(mk = purrr::map(data, ~sens.slope(.$mean)),
@@ -300,28 +275,22 @@ summaryMK <- bootstrapped.ts %>%
          p.value = round(p.value, 5)) %>%
   select(-data)
 
-#####Look at MK stats for for each region.
-sizeMK <- Preds.out %>% 
-  left_join(lake.join %>% select(COMID, areasqkm)) %>%
-  group_by(region) %>%
-  mutate(sizeClass = cut_number(areasqkm, 5, labels = F)) %>%
-  ungroup() %>%
-  filter(month %in% c(5:9)) %>%
-  group_by(year, region, sizeClass) %>%
-  summarise(value = median(value)) %>%
-  group_by(region, sizeClass) %>%
-  arrange(year) %>%
-  nest() %>%
-  mutate(mk = purrr::map(data, ~sens.slope(.$value)),
-         sen.slope = purrr::map_dbl(mk, 'estimates'),
-         sen.slope = sen.slope*100,
-         p.value = purrr::map_dbl(mk, 'p.value'),
-         p.value = round(p.value, 5)) %>%
-  select(-data) 
+```
 
-ggplot(sizeMK, aes(x = region, y = sen.slope, color = sizeClass)) + geom_point()
-  
-##Write a function to pull out man-kendall trends and slopes to connect with the wide data for bootsrapping
+## Individual lake analysis
+
+```{r}
+#Quickly look at the timeseries for a few individual lakes
+sample <- summ.meds %>%
+  group_by(COMID) %>%
+  summarise(count = n()) %>%
+  filter(count > 30) %>%
+  sample_n(2)
+
+check<- summ.meds %>% filter(COMID %in% counts$COMID) %>% 
+  ggplot(., aes(x = year, y = secchi.med)) + geom_line(aes(color = COMID, group = COMID)) + geom_smooth(se = F) + facet_wrap(~region, scales = 'free_y')
+
+##Write a function to pull out man-kendall trends and slopes to connect with the wide data
 mk <- summ.meds %>% filter(COMID %in% counts$COMID) %>% 
   group_by(COMID, region) %>%
   arrange(year) %>%
@@ -330,41 +299,13 @@ mk <- summ.meds %>% filter(COMID %in% counts$COMID) %>%
          sen.slope = purrr::map_dbl(mk, 'estimates'),
          sen.slope = sen.slope*100,
          p.value = purrr::map_dbl(mk, 'p.value')) %>%
-  select(COMID, region, sen.slope, p.value)
+  select(COMID, region, sen.slope, p.value) %>%
+  left_join(lake.join)
 
-
-
-##Now bootstrap over the trend statistics
-##Apply 1000 rounds of bootstrapping to yearly summer medians
-#Generate the bootsrap function
-boot.trend <- function(data, indices){
-  dt<-data[indices,] %>% mutate(dummy = 'dummy')
-  meds <- dt %>% group_by(dummy) %>% 
-    summarise_at(vars(sen.slope, p.value), mean, na.rm = T) %>%
-    select(-dummy)
-  c(as.numeric(paste(meds[1,])))
-}
-
-## Create a follow up function to pull the mean and se (sd) of bootstrap iterations
-boot.trend.summary<- function(boots){
-  summary <- tibble(mean = colMeans(boots$t),
-  se = apply(boots$t,2,sd),
-  bias = colMeans(boots$t) - boots$t0,
-  unit = c('sen.slope','p.value'))
-  return(summary)
-}
-
-bootstrapped.trend <- mk %>%
-  group_by(region) %>%
-  nest() %>%
-  mutate(boot.meds= purrr::map(data, ~boot(., boot.trend, R = 1000)),
-         boots.summ = purrr::map(boot.meds, boot.trend.summary)) %>%
-  select(-boot.meds, -data) %>%
-  unnest(boots.summ)
-
-
+ggplot(mk, aes(x = sen.slope)) + geom_histogram() + facet_wrap(~region, scales = 'free')
 
 ```
+
 
 NLA Comparison
 
@@ -399,9 +340,7 @@ nlaFull <- nla.2007 %>%
   mutate(source = 'NLA')
 
 predComp <- Preds.out %>% 
-  mutate(source = 'Sat') %>%
-  # bind_rows(Preds.out.sat %>% mutate(source = 'sat')) %>%
-  # bind_rows(Preds.out.Nosat %>% mutate(source = 'noSat')) %>%
+  mutate(source = 'Landsat') %>%
   na.omit() %>%
   filter(month %in% c(5:9), year %in% c(2007,2012)) %>%
   group_by(year, region, source) %>%
@@ -410,8 +349,9 @@ predComp <- Preds.out %>%
             secchi.sd = sd(value, na.rm =T)) %>%
   bind_rows(nlaFull)
 
-ggplot(predComp %>% filter(source %in% c('Sat', 'NLA')), aes(x = region, color = source)) +
+ggplot(predComp, aes(x = region, color = source)) +
   geom_point(aes(y = secchi.mean)) +
+  #geom_point(aes(y = secchi.median)) +
   geom_errorbar(aes(ymin = secchi.mean - secchi.sd, ymax = secchi.mean + secchi.sd)) +
   scale_color_viridis_d(end = .7) +
   facet_wrap(~year) +
@@ -419,31 +359,13 @@ ggplot(predComp %>% filter(source %in% c('Sat', 'NLA')), aes(x = region, color =
   theme(axis.text.x = element_text(angle = 90, hjust = 1)) +
   labs(x = 'Region', y = 'Water Clarity (m)', title = 'Comparison of NLA to Remotely Sensed Predictions')
 
-predComp <- Preds.out %>% filter(year %in% c(2007,2012),
-                                 month %in% c(5:9)) %>%
-  select(region, secchi = value, year) %>%
-  mutate(source = 'RS') %>%
-  bind_rows(nla.2007 %>% select(region, secchi) %>%
-              mutate(source = 'NLA', year = 2007)) %>%
-  bind_rows(nla.2012 %>% select(region, secchi) %>%
-              mutate(source = 'NLA', year = 2012))
-
-ggplot(predComp, aes(x = region, y = secchi, color = source)) + 
-  geom_violin()  + 
-  scale_color_viridis_d(end = .6) +
-  scale_y_continuous(limits = c(0,10)) +
-  facet_wrap(~year, ncol = 2) +
-  theme_bw() +
-  theme(axis.text.x = element_text(angle = 90, hjust = 1))
-        
-        
 ```
 
 
 ```{r}
 check = srMunged %>%group_by(COMID) %>% summarise(count = n()) %>% arrange(desc(count))
 
-srMunged %>% filter(COMID == check$COMID[2], year > 1999, year < 2013) %>% ggplot(., aes(x = red, color = sat)) + geom_density()
+srMunged %>% filter(COMID == check$COMID[3], year > 1999, year < 2013) %>% ggplot(., aes(x = red, color = sat)) + geom_density()
 
 ```
 

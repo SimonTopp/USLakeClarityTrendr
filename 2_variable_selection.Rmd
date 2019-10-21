@@ -35,13 +35,12 @@ library(ggpmisc)
 #Attempt at FFS Using xgboost and spatial cross validation.
 
 ```{r}
-## Quick Notes from Matt
-## Ideas from Matt, the small area
-## litho ones worth checking out 114, impervious and ag, wetland ones, Pct Crop, make forest one thats sum WetIndex Cat. BFICat, NPDES?
+
 ## Do some final munging/feature engineering
 log = F
-iteration = 'dWL_Noln_sat_Secchi'
+iteration = 'FFS_DistNorm_noLn_Secchi'
 region <- st_read('in/NLA/NLA_Ecoregions/EcoRegsMerged.shp')
+source('0_ModellingFunctions.R')
 
 srMunged <- read_feather('out/srMunged.feather') %>%
   filter(parameter == 'secchi',
@@ -54,11 +53,11 @@ srMunged <- read_feather('out/srMunged.feather') %>%
          areasqkm = round(areasqkm, 1),
          meandused = round(meandused, 1),
          inStreamCat = as.numeric(inStreamCat),
-         ##Corect based on simple linear regs (see _l7l8_Comps.Rmd)
-         nir = ifelse(sat == '8', 1.01621*nir + 99.28166, nir),
-         red = ifelse(sat == '8', 0.9346232*red + 83.54783, red),
-         blue = ifelse(sat == '8',0.8667114*blue + 123.16116, blue),
-         green = ifelse(sat == '8', 0.8975912*green + 101.77444, green),
+         #Correct the reflectance values based on distribution comparisons (see line 358 in 1_nhd_join_and_munge.Rmd)
+         nir = ifelse(sat == '5', nir - 58, ifelse(sat == '8', nir + 83, nir)),
+         red = ifelse(sat == '5', red - 38, ifelse(sat == '8', red + 33, red)),
+         blue = ifelse(sat == '5', blue - 9, ifelse(sat == '8', blue + 45, blue)),
+         green = ifelse(sat == '5', green - 36, ifelse(sat == '8', green + 29, green)),
          NR = nir/red,
          BR = blue/red,
          GR = green/red,
@@ -73,6 +72,7 @@ srMunged <- read_feather('out/srMunged.feather') %>%
          ndvi = ((nir-red)/(nir+red)),
          ndwi = ((green- swir1)/(green + swir1)),
          dWL = fui.hue(red, green, blue)) %>%
+  filter_at(vars(nir, red, blue, green), all_vars(.>0 & .<2000)) %>%
   rowwise() %>%
   mutate(saturation = rgb2hsv(r=red, g=green, b=blue, maxColorValue = 2000)[2],
          brightness = rgb2hsv(r=red,g= green, b= blue, maxColorValue = 2000)[3]) %>%
@@ -88,7 +88,8 @@ if(log == T){srMunged <- srMunged %>% mutate(value = log(value))}
 paste0(names(srMunged), collapse = ', ')
 
 ## These parameters make sense in terms of their mechanisms, resolution (with some assumptions), and reliability
-features <- "green, nir, red, NR, GR, GN, inStreamCat, PctCarbResidCat, Precip8110Cat, Tmean8110Cat, RunoffCat, ClayCat, SandCat, OmCat, PermCat, RckdepCat, WtDepCat, BFICat, ElevCat, AOD, BFICat, KffactCat, CatAreaSqKm, PctAg2006Slp10Cat, ElevCat, NPDESDensCat, HydrlCondCat, PctImp2006Cat, pctUrban2006, pctForest2006, PctCrop2006Cat, PctImp2006Cat, pctWetland2006, WetIndexCat, areasqkm, meandused, sat"
+features <- "NR, BG, dWL, inStreamCat, PctCarbResidCat, Precip8110Cat, Tmean8110Cat, RunoffCat, ClayCat, SandCat, OmCat, PermCat, RckdepCat, WtDepCat, BFICat, ElevCat, AOD, BFICat, KffactCat, CatAreaSqKm, PctAg2006Slp10Cat, ElevCat, NPDESDensCat, HydrlCondCat, PctImp2006Cat, pctUrban2006, pctForest2006, PctCrop2006Cat, pctWetland2006, WetIndexCat, areasqkm, meandused"
+
 features <- str_split(features, pattern = ', ') %>% unlist()
 
 ##Pull holdout data
@@ -153,15 +154,12 @@ ffsResults %>%
 
 ```{r baseline model, message=FALSE}
 # ffsVariables <- read_feather('out/ffsResultsFull.feather')
-# features <- ffsVariables[ffsVariables$RMSE == min(ffsVariables$RMSE),] %>%
-#   select(-c(nvar, RMSE, SE)) %>%
-#   paste(.) %>% .[.!= 'NA']
-#PctImp2006Cat,pctForest2006,
-features <- str_split("dWL, NR, BG, meandused, Tmean8110Cat, PermCat, AOD, RunoffCat, WtDepCat, PctCarbResidCat, areasqkm, inStreamCat", ', ')[[1]] 
+features <- ffsResults[ffsResults$RMSE == min(ffsResults$RMSE),] %>%
+  select(-c(nvar, RMSE, SE)) %>%
+  paste(.) %>% .[.!= 'NA']
 
 oneHot <- onehot(df %>% select(features))
 df.encoded <- predict(oneHot, df %>% select(features)) %>% as.data.frame(.) 
-
 
 # We'll set up a tuning grid with default values, define a `trainControl()`
 # function (which in this case disables printing training log to console
@@ -173,8 +171,8 @@ grid_default <- expand.grid(
   max_depth = 4,
   eta = 0.3,
   gamma = 0,
-  colsample_bytree = 1,
-  min_child_weight = 1,
+  colsample_bytree = .8,
+  min_child_weight = .8,
   subsample = 1
 )
 
@@ -386,7 +384,7 @@ xgb_tune4$bestTune
 
 tune_grid5 <- expand.grid(
   nrounds = seq(from = 100, to = 1000, by = 50),
-  eta = c(0.05, 0.1, .15, .2), #c(0.01, 0.015, 0.025, 0.05, 0.1),
+  eta = c(0.03, 0.05, 0.1, .15), #c(0.01, 0.015, 0.025, 0.05, 0.1),
   max_depth = xgb_tune2$bestTune$max_depth,
   gamma = xgb_tune4$bestTune$gamma,
   colsample_bytree = xgb_tune3$bestTune$colsample_bytree,
@@ -492,17 +490,17 @@ evals <- output %>%
 
 evals %>% kable(digits = 2) %>% kable_styling() %>% scroll_box(width = '4in')
 
-ggplot(output, aes(x = Actual, y = Predicted)) + 
+ggplot(output, aes(x = Actual +.5, y = Predicted +.5)) + 
   geom_hex(aes(fill = ..count..)) + 
   scale_fill_viridis(name = 'Point\nCount', trans = 'log10') + 
   geom_abline(color = 'red') + 
   stat_poly_eq(aes(label =  paste(stat(adj.rr.label))),
                formula = y~x, parse = TRUE, 
                label.y = Inf, vjust = 1.3) +
-  #scale_x_continuous(trans = 'log10', labels = scales::comma) +
-  #scale_y_continuous(trans = 'log10', labels = scales::comma) +
+  scale_x_continuous(trans = 'log10', labels = scales::comma) +
+  scale_y_continuous(trans = 'log10', labels = scales::comma) +
   #coord_equal(ratio = 1) +
-  labs(title = 'XgBoost Water Quality Models', subtitle = 'Red line is 1:1')
+  labs(title = 'Hold-Out Validation', subtitle = 'Red line is 1:1', x = 'Actual', y = 'Predicted')
 
 output.full <- output %>%
   left_join(srMunged, by = 'UniqueID') %>%
@@ -549,7 +547,10 @@ spaceTimeFigs()
 spaceTimeFigs(abs = F)
 
 output.full %>% mutate(yearGroups = cut_number(year, 20)) %>%
-  ggplot(., aes(x = yearGroups, y = residual)) + geom_violin(draw_quantiles = c(.25,.5,.75)) + theme(axis.text.x = element_text(angle = 90, vjust = .5))
+  ggplot(., aes(x = yearGroups, y = residual)) + 
+  geom_boxplot() +
+  #geom_violin(draw_quantiles = c(.25,.5,.75)) + 
+  theme(axis.text.x = element_text(angle = 90, vjust = .5))
   
   group_by(yearGroups) %>%
   summarise(mean.residual = mean(residual),
