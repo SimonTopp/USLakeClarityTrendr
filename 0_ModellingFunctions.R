@@ -9,7 +9,6 @@ EvalPreds <- function(id, paths, lakesUp, log, model, features, lakeSamp){
       mutate(COMID = as.character(COMID),
              year = year(date)) %>%
       filter(!is.na(blue)) %>%
-      filter_at(vars(blue,green,red,nir,swir1,swir2),all_vars(.>0 & .< 2000)) %>%
       inner_join(lakesUp %>% mutate(COMID = as.character(COMID))) %>%
       distinct(.keep_all = T)
     
@@ -31,7 +30,8 @@ EvalPreds <- function(id, paths, lakesUp, log, model, features, lakeSamp){
              pctWetland2006 = PctWdWet2006Cat + PctHbWet2006Cat,
              areasqkm = round(areasqkm, 1),
              meandused = round(meandused, 1)) %>%
-      filter(pixelCount > pix.cut)
+      filter(pixelCount > pix.cut) %>%
+      filter_at(vars(blue,green,red,nir,swir1,swir2),all_vars(.>0 & .< 2000))
 
     if('AOD' %in% features){
       if(lakeSamp == 'NLA'){
@@ -204,8 +204,7 @@ fui.hue <- function(R, G, B) {
 
 
 
-# We want ~ two hundred lakes per huc, but a couple have fewer than 200.  This function take
-# either all the lakes if less than sample size or sample size.
+## function for sampling either full stack or number if number is less than full stack.
 sample_vals <- function (tbl, size, replace = FALSE, weight = NULL){
   ## assert_that(is.numeric(size), length(size) == 1, size >= 0)
   weight <- substitute(weight)
@@ -218,4 +217,25 @@ sample_vals <- function (tbl, size, replace = FALSE, weight = NULL){
                                                      weight = weight))
   idx <- unlist(sampled) ## + 1
   grouped_df(tbl[idx, , drop = FALSE], vars = groups(tbl))
+}
+
+##############Bootstrapping functions
+
+#Generate the bootsrap function
+boot.med <- function(data, indices){
+  dt<-data[indices,] %>% mutate(dummy = 'dummy')
+  
+  meds <- dt %>% group_by(dummy) %>% 
+    summarise_at(vars(`1984`:`2018`), mean, na.rm = T) %>%
+    select(-dummy)
+  c(as.numeric(paste(meds[1,])))
+}
+
+## Create a follow up function to pull the mean and se (sd) of bootstrap iterations
+boot.summary<- function(boots){
+  summary <- tibble(mean = colMeans(boots$t),
+                    se = apply(boots$t,2,sd),
+                    bias = colMeans(boots$t) - boots$t0,
+                    year = c(1984:2018))
+  return(summary)
 }
