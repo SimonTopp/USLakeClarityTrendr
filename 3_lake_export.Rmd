@@ -218,7 +218,7 @@ print('done')
 # Download files to local directory
 
 ```{r}
-files <- drive_ls('aquaModel_lakesEcoReg2000')
+files <- drive_ls('aquaModel_lakesEcoReg2000_nemer88')
 files <- files %>% filter(!name %in% list.files('lake_data/EcoReg2000'))
 
 for(i in c(1:nrow(files))){

@@ -16,7 +16,6 @@ library(viridis)
 library(knitr)
 library(sf)
 library(rgdal)
-library(maps)
 library(magrittr)
 library(mlbench)
 library(caret)
@@ -24,7 +23,6 @@ library(doParallel)
 library(furrr)
 library(kableExtra)
 library(dataRetrieval)
-library(USAboundaries)
 library(lubridate)
 ```
 
@@ -338,20 +336,43 @@ munged <- munged %>%
 ##Take a look at the dist and count of the final
 
 ```{r}
-munged.sf <- st_as_sf(munged,coords=c('long','lat'), crs=4326) %>%
-    st_transform(.,2163)
+hucs <- st_read('in/hucs/hucs.shp')
+
+sr.sf <- read_feather('out/srMunged.feather') %>%
+  filter(parameter == 'secchi',
+         value <= 10,
+         !is.na(CatAreaSqKm)) %>%
+  st_as_sf(coords = c('long', 'lat'), crs = 4326) %>%
+  st_transform(st_crs(hucs))
+
+
+usa = st_as_sf(maps::map('usa',plot=F,fill=T)) %>%
+    st_transform(.,2163) %>%
+    st_buffer(.,0) 
+
+huc.sr.sf <- st_join(hucs,sr.sf) %>%
+  as_tibble() %>%
+  filter(!is.na(value)) %>%
+  group_by(HUC_8) %>%
+  summarise(Overpasses=n()) %>%
+  filter(Overpasses > 0) %>%
+  left_join(hucs, by = 'HUC_8')
 
 ggplot() +
-  geom_sf(data = usa, fill = 'grey40') + 
-  geom_sf(data = huc.munged.sf,aes(fill=Overpasses), color=NA)  + 
+  geom_sf(data = usa, fill = 'grey20') + 
+  geom_sf(data = huc.sr.sf,aes(fill=Overpasses), color=NA)  + 
   scale_fill_gradient2(low='#a50026',mid='#abd9e9', high='#313695',na.value='black',midpoint = 2, trans='log10', name = 'Cloud Free Overpasses') +
   theme_bw() +
+  ggtitle('Cloud free coincident field and Landsat Observations') +
   theme(legend.position = 'bottom', 
         legend.direction = 'horizontal',
-        legend.title = element_text(size = 10)) +
-  facet_wrap(~parameter, nrow = 2)
+        panel.grid.major = element_line(color = 'white'),
+        panel.border = element_blank(),
+        axis.text = element_blank(),
+        axis.ticks = element_blank(),
+        plot.title = element_text(hjust = .5))
 
-ggsave('figures/MungedOverpasses.png', width = 7.5, height = 6, units = 'in', dpi = 300)
+ggsave('figures/MungedOverpasses.png', width = 6, height = 5, units = 'in', dpi = 300)
 
 ```
 
@@ -359,7 +380,7 @@ ggsave('figures/MungedOverpasses.png', width = 7.5, height = 6, units = 'in', dp
 ## Finally, we need to standardize our reflectance values
 
 ##Filter to just the observations we'll use for the actual analysis.
-lsComps <- read_feather('out/srMunged.feather') %>%
+lsCompsPre <- read_feather('out/srMunged.feather') %>%
   filter(parameter == 'secchi',
          value <= 10,
          !is.na(CatAreaSqKm)) %>%
@@ -369,29 +390,29 @@ lsComps <- read_feather('out/srMunged.feather') %>%
 
 
 ##First, compare landsat 5 to landsat 7.  We'll limit the comparison to coincident dates when both satellites were in the air.  Theoretically these distributions should be the same.
-lsComps %>% filter(year > 1999, year < 2012) %>% gather(red, blue, green, nir, NR, BG, dWL, key = 'Band', value = 'value') %>%
+lsCompsPre %>% filter(year > 1999, year < 2012) %>% gather(red, blue, green, nir, dWL, key = 'Band', value = 'value') %>%
   ggplot(., aes(x = value, color = sat)) + geom_density() + facet_wrap(~Band, scales = 'free') 
 
 
 ## Calculate differences between 5 and 7
-lsComps %>% filter(year > 1999, year < 2012) %>% gather(red, blue, green, nir, NR, BG, dWL, key = 'Band', value = 'value') %>%
+lsCompsPre %>% filter(year > 1999, year < 2012) %>% gather(red, blue, green, nir, NR, BG, dWL, key = 'Band', value = 'value') %>%
   group_by(sat, Band) %>%
   summarise(med = median(value)) %>%
   spread(sat, med) %>%
   mutate(satDiff = `7` - `5`)
 
 ## Now look at differences between 7 and 8.  Similarly, we'll limit this to only coincident time periods
-lsComps %>% filter(year > 2012) %>% gather(red, blue, green, nir, NR, BG, dWL, key = 'Band', value = 'value') %>%
+lsCompsPre %>% filter(year > 2012) %>% gather(red, blue, green, nir, NR, BG, dWL, key = 'Band', value = 'value') %>%
   ggplot(., aes(x = value, color = sat)) + geom_density() + facet_wrap(~Band, scales = 'free') 
 
-lsComps %>% filter(year > 2012) %>% gather(red, blue, green, nir, NR, BG, dWL, key = 'Band', value = 'value') %>%
+lsCompsPre %>% filter(year > 2012) %>% gather(red, blue, green, nir, NR, BG, dWL, key = 'Band', value = 'value') %>%
   group_by(sat, Band) %>%
   summarise(med = median(value)) %>%
   spread(sat, med) %>%
   mutate(satDiff = `7` - `8`)
 
 ## Apply bias correction to 5 and 8 to standardize them to 7 and look at the distributions again
-lsComps <- read_feather('out/srMunged.feather') %>%
+lsCompsPost <- read_feather('out/srMunged.feather') %>%
   filter(parameter == 'secchi',
          value <= 10,
          !is.na(CatAreaSqKm)) %>%
@@ -403,16 +424,40 @@ lsComps <- read_feather('out/srMunged.feather') %>%
          BG = blue/green,
          dWL = fui.hue(red, green, blue))
 
+## Before and after figures
 #5 and 7
-lsComps %>% filter(year > 1999, year < 2012) %>% gather(red, blue, green, nir, NR, BG, dWL, key = 'Band', value = 'value') %>%
-  ggplot(., aes(x = value, color = sat)) + geom_density() + facet_wrap(~Band, scales = 'free') 
-#7 and 8
-lsComps %>% filter(year > 2012) %>% gather(red, blue, green, nir, NR, BG, dWL, key = 'Band', value = 'value') %>%
-  ggplot(., aes(x = value, color = sat)) + geom_density() + facet_wrap(~Band, scales = 'free') 
-#Overall
-lsComps %>% gather(red, blue, green, nir, NR, BG, dWL, key = 'Band', value = 'value') %>%
-  ggplot(., aes(x = value, color = sat)) + geom_density() + facet_wrap(~Band, scales = 'free') 
+p1 <- lsCompsPre %>% filter(year > 1999, year < 2012) %>% gather(red, blue, green, nir, key = 'Band', value = 'value') %>% mutate(correction = 'Pre.Correction') %>% 
+  bind_rows(lsCompsPost %>% filter(year > 1999, year < 2012) %>% gather(red, blue, green, nir, key = 'Band', value = 'value') %>% mutate(correction = 'Post.Correction')) %>%
+  ggplot(., aes(x = value, color = sat)) + geom_density() + facet_grid(Band~correction, scales = 'free') + scale_color_viridis_d(end = .3) + theme_bw() + theme(legend.position = 'none') + ggtitle('Landsat 5 and 7 SR Distributions')
+
+p2 <- lsCompsPre %>% filter(year > 1999, year < 2012) %>% mutate(value = dWL, Band = 'dWL', correction = 'Pre.Correction') %>% bind_rows(lsCompsPost %>% filter(year > 1999, year < 2012) %>% mutate(value = dWL, Band = 'dWL', correction = 'Post.Correction')) %>%  ggplot(., aes(x = value, color = sat)) + geom_density() + facet_grid(Band~correction, scales = 'free') + scale_color_viridis_d(end = .3) + theme_bw() + theme(legend.position = 'bottom') + ggtitle('Resulting Dominant Wavelength')
+
+g <- grid.arrange(p1,p2, ncol = 1, heights = c(5,3))
+ggsave('figures/5_7_CorrectionsComps.png', g, width = 4, height = 6, units = 'in')
+
+
+## 7 and 8
+p1 <- lsCompsPre %>% filter(year > 2012) %>% gather(red, blue, green, nir, key = 'Band', value = 'value') %>% mutate(correction = 'Pre.Correction') %>% 
+  bind_rows(lsCompsPost %>% filter(year > 2012) %>% gather(red, blue, green, nir, key = 'Band', value = 'value') %>% mutate(correction = 'Post.Correction')) %>%
+  ggplot(., aes(x = value, color = sat)) + geom_density() + facet_grid(Band~correction, scales = 'free') + scale_color_viridis_d(begin = .3, end = .7) + theme_bw() + theme(legend.position = 'none') + ggtitle('Landsat 7 and 8 SR Distributions')
+
+p2 <- lsCompsPre %>% filter(year > 2012) %>% mutate(value = dWL, Band = 'dWL', correction = 'Pre.Correction') %>% bind_rows(lsCompsPost %>% filter(year > 2012) %>% mutate(value = dWL, Band = 'dWL', correction = 'Post.Correction')) %>%  ggplot(., aes(x = value, color = sat)) + geom_density() + facet_grid(Band~correction, scales = 'free') + scale_color_viridis_d(begin = .3, end = .7) + theme_bw() + theme(legend.position = 'bottom') + ggtitle('Resulting Dominant Wavelength')
+
+g <- grid.arrange(p1,p2, ncol = 1, heights = c(5,3))
+ggsave('figures/7_8_CorrectionsComps.png', g, width = 4, height = 6, units = 'in')
 
 ## They look way better
 ```
+
+## Finally take a look at the correlations between various bands/ratios and AOD
+
+
+```{r}
+
+
+
+
+```
+
+
 

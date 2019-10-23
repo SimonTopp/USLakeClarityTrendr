@@ -59,18 +59,7 @@ srMunged <- read_feather('out/srMunged.feather') %>%
          blue = ifelse(sat == '5', blue - 9, ifelse(sat == '8', blue + 45, blue)),
          green = ifelse(sat == '5', green - 36, ifelse(sat == '8', green + 29, green)),
          NR = nir/red,
-         BR = blue/red,
-         GR = green/red,
-         NR = nir/red,
-         SR = swir1/red,
          BG = blue/green,
-         BN = blue/nir,
-         BS = blue/swir1,
-         GS = green/swir1,
-         GN = green/nir,
-         fai = nir - (red + (swir1-red)*((830-660)/(1650-660))),
-         ndvi = ((nir-red)/(nir+red)),
-         ndwi = ((green- swir1)/(green + swir1)),
          dWL = fui.hue(red, green, blue)) %>%
   filter_at(vars(nir, red, blue, green), all_vars(.>0 & .<2000)) %>%
   rowwise() %>%
@@ -479,6 +468,8 @@ write_feather(output, paste0('out/outputs/',iteration, '.feather'))
 ```
 
 ```{r Eval}
+output <- read_feather(paste0('out/outputs/',iteration, '.feather'))
+
 evals <- output %>%
   summarise(rmse = rmse(Actual, Predicted),
             mae = mae(Actual, Predicted),
@@ -501,6 +492,8 @@ ggplot(output, aes(x = Actual +.5, y = Predicted +.5)) +
   scale_y_continuous(trans = 'log10', labels = scales::comma) +
   #coord_equal(ratio = 1) +
   labs(title = 'Hold-Out Validation', subtitle = 'Red line is 1:1', x = 'Actual', y = 'Predicted')
+
+ggsave('figures/ModelValidation.png', width = 4, height = 3.5, units = 'in')
 
 output.full <- output %>%
   left_join(srMunged, by = 'UniqueID') %>%
@@ -548,8 +541,8 @@ spaceTimeFigs(abs = F)
 
 output.full %>% mutate(yearGroups = cut_number(year, 20)) %>%
   ggplot(., aes(x = yearGroups, y = residual)) + 
-  geom_boxplot() +
-  #geom_violin(draw_quantiles = c(.25,.5,.75)) + 
+  #geom_boxplot() +
+  geom_violin(draw_quantiles = c(.25,.5,.75)) + 
   theme(axis.text.x = element_text(angle = 90, vjust = .5))
   
   group_by(yearGroups) %>%
@@ -561,7 +554,10 @@ output.full %>% mutate(yearGroups = cut_number(year, 20)) %>%
 model$modelInfo$varImp(model$finalModel) %>%
   mutate(Feature = fct_reorder(rownames(.), Overall, .desc = T)) %>%
   arrange(Overall) %>%
-  ggplot(., aes(x = Feature, y = Overall)) + geom_col() + coord_flip()
+  ggplot(., aes(x = Feature, y = Overall)) + geom_col() + coord_flip() +
+  ggtitle('Feature Importance')
+
+ggsave('figures/FeatImp.png', width = 3.5, height = 3, units = 'in')
 ```
 
 
@@ -622,29 +618,115 @@ ggplot(output.full, aes(x = Actual, y = Predicted)) +
   scale_y_continuous(trans = 'log10', labels = scales::comma) +
   #coord_equal(ratio = 1) +
   facet_wrap(~region, scales = 'free', shrink = T) +
-  labs(title = 'Regional Evaluation Performance')
+  labs(title = 'Regional Evaluation Performance') + theme_bw()
+
+ggsave('figures/RegionalEval.png', width = 6.5, height =6, units = 'in')
 
 dummy <- expand.grid(year = seq(1985,2018), month = c(1:12), region = factor(unique(region$region)))
 
-fieldmatch <- output.full %>%
+fieldmatch.coin <- output.full %>%
   filter(year < 2019,
-         !is.na(region)) %>%
-  rename(RS = Predicted, Field = Actual) %>%
-  gather(RS,Field, key = 'Measure', value = 'value') %>%
-  group_by(year, Measure, month, region) %>%
-  summarise(median = median(value, na.rm = T),
-            sd = sd(value, na.rm =T),
-            count.obs = n())%>%
-  right_join(dummy)%>%
-  arrange(region,year, month)%>%
-  mutate(date = as.POSIXct(paste0(year,'/',month,'/',01)))
+         month %in% c(5:9)) %>%
+  rename(RS = Predicted, In.Situ = Actual) %>%
+  gather(RS, In.Situ, key = 'Measure', value = 'value') %>%
+  mutate(Measure = ifelse(Measure == 'RS', 'Model Predictions', 'Coincident In Situ Observations')) %>%
+  group_by(year, COMID, Measure, region) %>%
+  summarise(value = median(value)) %>%
+  group_by(year, Measure, region) %>%
+  summarise(mean = mean(value))
 
-ggplot(fieldmatch %>% na.omit(), aes(date, y = median, color = Measure)) + 
-  geom_point(alpha = .1) +
-  geom_smooth(method = 'loess', span = .3, se = F) + 
-  facet_wrap(~region, scales = 'free', ncol = 4) +
+
+ggplot(fieldmatch.coin, aes(x = year, y = mean, color = Measure)) + 
+  #geom_point(alpha = .1) +
+  geom_line() + 
+  scale_color_viridis_d(end = .6) +
+  facet_wrap(~region, scales = 'free', ncol = 2) +
   labs(title = 'Smoothed SDD Trends By Region Using Coincident Testing Data') +
   theme_bw() +
   theme(legend.position = 'bottom')
+
+
+## Next do it with all the field data we got.  
+# We add the additional step of averaging per lake before per month because sampling is really uneven. 
+# Load in lagos and wqp data
+# sites <- read_feather('../Aquasat/2_rsdata/out/unique_site_inventory.feather')
+# 
+# wqp.lagos <- read_feather('../Aquasat/1_wqdata/out/wqp_lagos_unity.feather') %>%
+#   dplyr::select(SiteID, date_unity, source, value = secchi) %>%
+#   na.omit() %>%
+#   filter(value > 0.01, 
+#          value < 15) %>%
+#   left_join(sites) %>%
+#   filter(!is.na(lat)) %>%
+#   mutate(year = year(date_unity),
+#          month = month(date_unity)) %>%
+#   filter(month %in% c(5:9),
+#          year > 1983, year < 2019) %>%
+#   group_by(year, SiteID, lat, long) %>%
+#   dplyr::summarize(median = median(value),
+#                    count = n())
+# 
+# plan(multiprocess)
+# site.join <- wqp.lagos %>%
+#   ungroup() %>%
+#   distinct(SiteID, lat, long) %>%
+#   st_as_sf(coords = c('long', 'lat'), crs = 4326) %>%
+#   st_transform(st_crs(region)) %>%
+#   split(., c(1:10)) %>%
+#   future_map(~st_join(.,region, join = st_nearest_feature), .progress = T)
+# plan(sequential)
+# 
+# site.join <- rbind(site.join[[1]], site.join[[2]], site.join[[3]], site.join[[4]], site.join[[5]],
+#                     site.join[[6]], site.join[[7]], site.join[[8]], site.join[[9]], site.join[[10]])
+# 
+# fieldMean <- wqp.lagos %>%
+#   left_join(site.join) %>%
+#   group_by(year, region) %>%
+#   dplyr::summarize(mean = mean(median, na.rm = T),
+#             sd = sd(median, na.rm =T),
+#             count.obs = sum(count),
+#             count.sites = n())
+# 
+# write_feather(fieldMean, 'out/RegionalsInSituMeans.feather')
+
+## A little backwords but read in the bootstrapped predictions from 5_lake_analysis
+fieldmatch.full <- read_feather('out/RegionalsInSituMeans.feather') %>% mutate(Measure = 'In.Situ') %>%
+  select(year, region, mean, se = sd, Measure) %>% bind_rows(read_feather('out/TS_Preds/NLA_bootstrapped.feather') %>% mutate(Measure = 'RS'))
+
+fieldmatch.full <- read_feather('out/RegionalsInSituMeans.feather') %>% mutate(Measure = 'All In Situ Data')
+
+
+ggplot(fieldmatch.full, aes(x = year, y = mean, color = Measure)) + 
+  #geom_point(alpha = .1) +
+  geom_line() + 
+  scale_color_viridis_d(end = .6) +
+  facet_wrap(~region, scales = 'free', ncol = 2) +
+  labs(title = 'Smoothed SDD Trends By Region Using Coincident Testing Data') +
+  theme_bw() +
+  theme(legend.position = 'bottom')
+
+fieldmatch.coin %>% mutate(filter = 'Coincident In Situ Data') %>%
+  bind_rows(fieldmatch.full %>% mutate(filter = 'All Data')) %>%
+  ggplot(., aes(x = year, y = mean, color = Measure)) + 
+  #geom_point(alpha = .1) +
+  geom_line() + 
+  scale_color_viridis_d(end = .6) +
+  facet_grid(region~filter, scales = 'free_y') +
+  labs(title = 'Field and Remote Sensing Comparisons') +
+  theme_bw() +
+  theme(legend.position = 'bottom')
+
+
+fieldmatch.coin %>%
+  bind_rows(fieldmatch.full) %>%
+  ggplot(., aes(x = year, y = mean, color = Measure)) + 
+  #geom_point(alpha = .1) +
+  geom_smooth(span = .3, se = F) + 
+  #scale_color_viridis_d(end = .6) +
+  facet_wrap(~region, scales = 'free_y') +
+  labs(title = 'Field and Remote Sensing Comparisons') +
+  theme_bw() +
+  theme(legend.position = 'bottom')
+
 ```
 

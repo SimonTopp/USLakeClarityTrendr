@@ -34,6 +34,7 @@ library(scales)
 library(trend)
 library(kableExtra)
 library(Hmisc)
+library(boot)
 ```
 
 # This document details the primary results of regionalized bootstrapping for remotely sensed lake water clarity timeseries.
@@ -41,7 +42,7 @@ library(Hmisc)
 ```{r}
 # Bring in all the necessary stoof
 iteration = 'FFS_DistNorm_noLn_Secchi'
-lakeSamp = 'NLA'
+lakeSamp = 'EcoReg2000'
 log = F
 region = st_read('in/NLA/NLA_Ecoregions/EcoRegsMerged.shp')
 load(paste0('models/',iteration,'.Rdata'))
@@ -110,6 +111,13 @@ ggplot(predComp, aes(x = region, color = source)) +
   theme(axis.text.x = element_text(angle = 90, hjust = 1)) +
   labs(x = 'Region', y = 'Water Clarity (m)', title = 'Comparison of NLA to Remotely Sensed Predictions')
 
+ggsave('figures/NLAComps.png', width = 5, height = 4.5, units = 'in')
+
+check <- predComp %>% select(-secchi.median, -secchi.sd) %>% spread(source, secchi.mean)
+rmse(check$NLA, check$Landsat)
+bias(check$NLA, check$Landsat)
+mape(check$NLA, check$Landsat)
+mae(check$NLA, check$Landsat)
 ```
 
 ## Pull out median summer values first by lake and then region to examine non-monotic trends.
@@ -189,7 +197,7 @@ summaryMK <- bootstrapped.ts %>%
          p.value = purrr::map_dbl(mk, 'p.value'),
          p.value = round(p.value, 5),
          sig = ifelse(p.value < 0.1, 'yes', NA)) %>%
-  select(-data)
+  select(-data, -mk)
 
 
 ## Finally plot up Man-Kendal results
@@ -212,6 +220,198 @@ summaryMK %>%
     scale_fill_viridis_c(option = 'cividis') +
     labs(fill = 'Slope (cm/year)', color = 'P.Value < 0.1', title = 'MannKendall Slopes') +
     guides(color = guide_legend(label = F))
+
+write_feather(bootstrapped.ts, paste0('out/TS_Preds/',lakeSamp,'_bootstrapped.feather'))
+write_feather(summaryMK, paste0('out/TS_Preds/',lakeSamp,'_summaryMK.feather'))
+```
+
+
+## Compare remotely sensed and in situ observations
+
+```{r}
+
+meanFull <- fieldMean %>% 
+  mutate(source = 'In.Situ', se = NA, bias = NA) %>%
+  bind_rows(read_feather('out/TS_Preds/NLA_bootstrapped.feather') %>%
+              mutate(source = 'NLA')) %>%
+  bind_rows(read_feather('out/TS_Preds/EcoReg2000_bootstrapped.feather') %>%
+              mutate(source = 'Random'))
+
+
+meanFull %>%
+  filter(year < 2019, year > 1984) %>%
+  filter(source != 'In.Situ') %>%
+  ggplot(., aes(x = year, y = mean, group = source, color = source)) +
+  geom_errorbar(aes(ymin = mean - se, ymax = mean + se), color = 'grey60', alpha = .8) +
+  geom_line() +
+  theme_bw() +
+  #geom_point() +
+  scale_color_viridis_d(end = .6) +
+  facet_wrap(~region, scales = 'free', ncol = 2) +
+  labs(title = 'Mean and 90% confidence bound (stability)')
+
+
+FieldMK <- fieldMean %>%
+  group_by(region) %>%
+  arrange(year) %>%
+  nest() %>%
+  mutate(mk = purrr::map(data, ~sens.slope(.$mean)),
+         sen.slope = purrr::map_dbl(mk, 'estimates'),
+         sen.slope = sen.slope*100,
+         p.value = purrr::map_dbl(mk, 'p.value'),
+         p.value = round(p.value, 5),
+         sig = ifelse(p.value < 0.1, 'yes', NA)) %>%
+  select(-data, -mk)
+
+
+## Compare RS and in situ decompositions
+
+mk.full <- FieldMK %>%
+  mutate(source = 'In.Situ') %>%
+  bind_rows(read_feather('out/TS_Preds/NLA_summaryMK.feather') %>%
+              mutate(source = 'NLA')) %>%
+  bind_rows(read_feather('out/TS_Preds/EcoReg2000_summaryMK.feather') %>%
+              mutate(source = 'Random'))
+
+
+mk.full %>%
+  left_join(region) %>%
+  mutate(sen.slope = ifelse(sen.slope > 3, 1.5, sen.slope)) %>%
+  ggplot() +
+    geom_sf(aes(fill = sen.slope, color = sig)) +
+    theme(axis.text.x = element_blank(),
+          axis.text.y = element_blank(),
+          axis.ticks = element_blank(),
+          rect = element_blank(),
+          panel.grid.major = element_line(color = 'transparent'),
+          legend.position = 'bottom') +
+    scale_color_manual(values = 'red', breaks = 'yes') +
+    scale_fill_viridis_c(option = 'cividis') +
+    labs(fill = 'Slope (cm/year)', color = 'P.Value < 0.1', title = 'MannKendall Slopes') +
+    guides(color = guide_legend(label = F)) +
+  facet_wrap(~source)
+
+
+fieldmatch <- output.full %>%
+  filter(year < 2019,
+         !is.na(region)) %>%
+  rename(RS = Predicted, Field = Actual) %>%
+  gather(RS,Field, key = 'Measure', value = 'value') %>%
+  group_by(year, SiteID, Measure, month, region) %>%
+  summarise(median = median(value, na.rm = T)) %>%
+  group_by(year, Measure, month, region) %>%
+  summarise(median = median(median, na.rm = T)) %>%
+  right_join(dummy)%>%
+  arrange(region,year, month)%>%
+  mutate(date = as.POSIXct(paste0(year,'/',month,'/',01)))
+
+ggplot(fieldmatch %>% na.omit() %>%filter(year>1985,year <2018), aes(date, y = median, color = Measure)) +
+  #geom_point(alpha = .1) +
+  geom_smooth(method = 'loess', span = .2, se = F, size = .75) +
+  facet_wrap(~region, scales = 'free', ncol = 3) +
+  labs(title = 'Coincident Validation Field and RS Observations') +
+  theme_bw() +
+  theme(legend.position = 'bottom')
+
+df.full.encoded <- sr.sf %>%
+  filter(parameter == i,
+         !is.na(region),
+         value <= 15) %>%
+  mutate(value = log(value)) %>%
+  as.data.frame() %>%
+  select(-geometry)
+
+df.full.encoded <- predict(oneHot, df.full.encoded %>% select(one_of(features))) %>%
+  as.data.frame(.) %>% 
+  select(inputs)
+
+sr.preds <- sr.sf %>%
+  filter(parameter == i,
+         !is.na(region),
+         value <= 15) %>%
+  mutate(value = log(value)) %>%
+  as.data.frame() %>%
+  select(date, region, Field = value, SiteID, year, month) %>%
+  mutate(RS = exp(predict(model, df.full.encoded)),
+         Field = exp(Field))
+
+sr.preds %>% filter(year < 2019,
+         !is.na(region)) %>%
+  gather(RS,Field, key = 'Measure', value = 'value') %>%
+  group_by(year, SiteID, Measure, month, region) %>%
+  summarise(median = median(value, na.rm = T)) %>%
+  group_by(year, Measure, month, region) %>%
+  summarise(median = median(median, na.rm = T)) %>%
+  right_join(dummy)%>%
+  arrange(region,year, month)%>%
+  mutate(date = as.POSIXct(paste0(year,'/',month,'/',01))) %>%
+  na.omit() %>%
+  #filter(year>1985, year < 2018) %>%
+  ggplot(., aes(date, y = median, color = Measure)) +
+  #geom_point(alpha = .1) +
+  geom_smooth(method = 'loess', span = .2, se = F, size = .75) +
+  facet_wrap(~region, scales = 'free', ncol = 3) +
+  labs(title = 'Coincident Field and RS Observations') +
+  theme_bw() +
+  theme(legend.position = 'bottom')
+
+ggsave(paste0('figures/',mod,'InSituVsRsCoincident.png'), height = 6, width = 6.5, units = 'in')
+
+# ## Bring the two together into a figure
+# get_legend<-function(myggplot){
+#   tmp <- ggplot_gtable(ggplot_build(myggplot + theme(legend.position = 'bottom',
+#                                                      legend.background = element_rect(color = 'grey70'))))
+#   leg <- which(sapply(tmp$grobs, function(x) x$name) == "guide-box")
+#   legend <- tmp$grobs[[leg]]
+#   return(legend)
+# }
+# 
+# p2 <- matchfieldmedian %>%
+#   select(date, median, region, region, Measure) %>%
+#   na.omit()%>%
+#   filter(region %in% c('4_Great Lakes', '3_South Atlantic-Gulf', '5_Ohio', '17_Pacific Northwest', '14_Upper Colorado', '10_Missouri')) %>%
+# ggplot(., aes(date, y = median, color = Measure)) + 
+#   #geom_point(alpha = .1) +
+#   geom_smooth(method = 'loess', span = .2, se = F, size = .5) + 
+#   facet_grid(region~., scales = 'free_y') +
+#   #labs(title = 'Coincident Subsample Comparison') +
+#   theme_bw() +
+#   theme(#strip.background = element_blank(),
+#         #strip.text.x = element_blank(),
+#         axis.title = element_blank(),
+#         legend.position = 'none',
+#         axis.text.x = element_text(hjust = .75))
+# 
+# p1 <- stl.boots.mean %>% mutate(Data.Source = 'Remote.Sensing') %>%
+#   rename(trend = trend_mean) %>%
+#   left_join(regions) %>%
+#   bind_rows(stlField %>% mutate(Data.Source = 'In.Situ')) %>%
+#   filter(region %in% c('4_Great Lakes', '3_South Atlantic-Gulf', '5_Ohio', '17_Pacific Northwest', '14_Upper Colorado', '10_Missouri')) %>%
+#   ggplot(., aes(x = date, y = trend, color = Data.Source)) +
+#   geom_path(size = .5) + 
+#   facet_wrap(~region, scales = 'free_y', ncol = 1) +
+#   #labs(title = 'Full Field Sample Comparison') +
+#   theme_bw() +
+#   theme(strip.background = element_blank(),
+#         strip.text.x = element_blank(),
+#         axis.title = element_blank(),
+#         legend.position = 'none',
+#         axis.text.x = element_text(hjust = .75))
+# 
+# c1lab <- textGrob('Full Field Sample\nComparison')
+# c2lab <- textGrob('Coincident Subsample\nComparison')
+# 
+# leg <- get_legend(p1)
+# 
+# g <- grid.arrange(p1,p2, c1lab, c2lab, leg,
+#                   layout_matrix = rbind(c(5,5),
+#                                         c(3,4),
+#                                         c(1,2)),
+#                   bottom = 'Date',
+#                   left = 'Water Clarity (m)',
+#                   heights = c(.5,.5,6))
+# 
+# ggsave('figures/RSFieldComp.png', plot = g,width = 4, height = 8, units = 'in')
 
 ```
 
@@ -248,6 +448,9 @@ mk %>% st_as_sf(., coords = c('long','lat'), crs = 4326) %>% st_transform(st_crs
 ```
 
 
+
+
+##Quick look at how many obs we're averaging over for each month
 
 ```{r, include = F, eval = F}
 ## Average lake observations per region/month
@@ -442,188 +645,6 @@ ggsave(paste0('figures/', mod,'_lmMap.png'), width = 4, height = 5, dpi = 300)
 
 # g <- ggplot_build(lmMap)
 # colors = g$data[[1]]["fill"]
-
-```
-
-## Make some gifs
-
-```{r, eval = F}
-#Select area
-subset <- "Western Mountains"
-
-##Make TS image
-## Single watersheds
-stl.boots.mean %>% filter(region == subset) %>%
-  select(seasonal = seasonal_mean, Trend = trend_mean, seasonal_sd, date) %>%
-  mutate(Seasonal = Trend + seasonal) %>%
-  gather(Trend, Seasonal, key = 'Signal', value = 'Value') %>%
-  #arrange(Signal, date) %>%
-  ggplot(., aes(x = date, y = Value, color = Signal, size = Signal, group = Signal)) +
-  geom_path() +
-  scale_color_manual(values = c('grey60', 'red')) +
-  scale_size_manual(values = c(.7,1)) +
-  theme_bw() +
-  labs(y = 'Water Clarity (m)', x = 'Date', title = subset) +
-  theme(plot.caption = element_text(hjust = .7, size = 7.5))
-
-ggsave(paste0('figures/',subset,'.png'), width = 4, height = 2.5, units = 'in')
-
-#Make Static seasonal image
-stl.boots.mean %>% 
-  filter(region == subset, 
-         year == 1985,
-         !is.na(seasonal_mean)) %>%
-  ggplot(., aes(x = month, y = seasonal_mean)) +
-    geom_smooth(se = F, span = .4, aes(color = 'Seasonal Pattern')) +
-    #geom_ribbon(aes(ymin = seasonal_mean -2*seasonal_sd, ymax = seasonal_mean+2*seasonal_sd), alpha = .3)+
-    geom_point(aes(x = month.min, y = min(seasonal_mean)-max(seasonal_sd), color= 'Minimum Clarity'), size = 2) +
-    geom_point(aes(x = month.max, y = min(seasonal_mean)-max(seasonal_sd), color = 'Maximum Clarity'), size = 2) +
-    scale_color_manual(values = c('blue', 'brown', 'black')) + 
-    scale_x_continuous(breaks = c(1:12), labels = c(1:12)) +
-    #theme(legend.position = 'none') +
-    labs(x = 'Month', y = 'Seasonal Clarity Signal (m)', color = '')+
-    theme(legend.position = 'bottom') +
-    ggtitle(subset, 'Year: 1985')
-
-#ggsave(paste0('figures/',region,'_static.png'), width = 3.5, height = 3.5, units = 'in')
-
-p <- stl.boots.mean %>% 
-  filter(region == subset, 
-         !is.na(seasonal_mean)) %>%
-  ggplot(., aes(x = month, y = seasonal_mean)) +
-    geom_smooth(se = F, span = .4, aes(color = 'Seasonal Pattern')) +
-    #geom_ribbon(aes(ymin = seasonal_mean -2*seasonal_sd, ymax = seasonal_mean+2*seasonal_sd), alpha = .3)+
-    geom_point(aes(x = month.max, y = min(seasonal_mean)-max(seasonal_sd), color = 'Minimum Clarity'), size = 2) +
-    geom_point(aes(x = month.min, y = min(seasonal_mean)-max(seasonal_sd), color= 'Maximum Clarity'), size = 2) +
-    scale_color_manual(values = c('blue', 'brown', 'black')) + 
-    scale_x_continuous(breaks = c(1:12), labels = c(1:12)) +
-    #theme(legend.position = 'none') +
-    labs(x = 'Month', y = 'Seasonal Clarity Signal (m)', color = '')+
-    theme(legend.position = 'bottom') +
-  transition_states(year, transition_length = .5, state_length = 1) +
-  ggtitle(subset, 'Year: {closest_state}')
-
-
-pgif <- animate(p, width = 3.5, height = 3.5, units = 'in', res = 250)
-
-grid.arrange(p1, rasterGrob(pgif), bottom = 'Trends and seasonality of lake water clarity in the Tennessee Region HUC 2 watershed')
-
-anim_save(paste0('figures/',subset,'.gif'))
-
-#Combine into 1 image.
-a_mgif <- image_read('figures/Tennessee Region.png')
-b_mgif <- image_read(pgif)
-
-new_gif <- image_append(c(a_mgif, b_mgif[1]))
-for(i in 1:35){
-  combined <- image_append(c(a_mgif, b_mgif[i]))
-  new_gif <- c(new_gif, combined)
-}
-
-image_write_gif(new_gif,'figures/test.gif')
-
-image_read(new_gif)
-
-colors <- tibble(colors = viridis(18))
-
-
-```
-
-## Static Seasonal Figs
-
-```{r}
-# Static image for publication
-## make new data from for min max values
-seas.min.max <- stl.boots.mean %>%
-  filter(!is.na(trend_mean)) %>%
-  group_by(region, year) %>%
-  dplyr::summarize(month.min = first(month.min),
-            month.max = first(month.max)) %>%
-  gather(month.max, month.min, key = 'MinMax', value = 'Month') %>%
-  group_by(region, MinMax, Month) %>%
-  dplyr::summarize(count = n(),
-                   year = round(mean(year))) %>%
-  left_join(stl.boots.mean %>%
-              filter(!is.na(trend_mean)) %>%
-                       group_by(region) %>%
-              dplyr::summarize(minVal = min(seasonal_mean) -.08)) %>%
-  left_join(region)
-
-stl.boots.mean %>% 
-  left_join(region) %>%
-  ggplot(., aes(x = month, y = seasonal_mean, color = year)) +
-  # geom_ribbon(aes(ymin = seasonal_mean -2*seasonal_sd, 
-  #                 ymax = seasonal_mean+2*seasonal_sd), alpha = .1)+
-  geom_smooth(se = F, span = .4, aes(group = year)) +
-  scale_color_viridis_c(direction = -1) +
-  #geom_point(aes(x = Month, y = minVal, shape = MinMax, size = count), data = seas.min.max) +
-    scale_x_continuous(breaks = c(1:12), labels = c('J','F','M',"A","M","J","J","A","S","O","N","D")) +
-    labs(y = 'Water Clarity Variation (m)', x = 'Month', color = 'Year',
-         title = 'Seasonal variation in clarity over time') +
-   theme(legend.position = 'bottom') +
-  guides(shape = guide_legend(title = NULL)) +
-  facet_wrap(~region, scales = 'free_y', ncol = 3) 
-
-ggsave('figures/seasonal_static.png', width = 6, height = 5, units = 'in')
-
-
-## Function for pulling legend out of a single plot
-# get_legend<-function(myggplot){
-#   tmp <- ggplot_gtable(ggplot_build(myggplot))
-#   leg <- which(sapply(tmp$grobs, function(x) x$name) == "guide-box")
-#   legend <- tmp$grobs[[leg]]
-#   return(legend)
-# }
-#ggsave('figures/SeasonalStatic.png', width = 7.25, height = 5, units = 'in')
-
-
-# Finally, look at how min and max months have changed.
-stl.boots.mean %>%
-  filter(!is.na(trend_mean)) %>%
-  group_by(region, year) %>%
-  dplyr::summarize(month.min = first(month.min),
-            month.max = first(month.max)) %>%
-  gather(month.max, month.min, key = 'MinMax', value = 'Month') %>%
-  group_by(region, MinMax, Month) %>%
-  ggplot(., aes(x = year, y = Month, color = MinMax)) + geom_line() + geom_point()+ facet_wrap(~region)
-
-check <- seas.min.max %>% group_by(region, MinMax) %>%
-  dplyr::summarize(mean.month = mean(Month, na.rm = T),
-            sd.month = sd(Month, na.rm = T))
-sd(seas.min.max$Month[seas.min.max$MinMax == 'month.min'])
-
-check %>% group_by(MinMax) %>%
-  dplyr::summarize(mean.month = mean(mean.month, na.rm = T),
-            sd.month = sd(sd.month, na.rm = T))
-
-stl.boots.mean %>%
-  filter(!is.na(trend_mean)) %>%
-  group_by(region, year) %>%
-  dplyr::summarize(month.min = first(month.min),
-            month.max = first(month.max)) %>%
-  gather(month.max, month.min, key = 'MinMax', value = 'Month') %>%
-  # group_by(region, MinMax) %>%
-  # dplyr::summarize(month.mean = mean(Month),
-  #                  month.median = median(Month)) %>%
-  ggplot(., aes(y = Month, x = year, group = year)) + geom_boxplot() +
-  scale_y_continuous(breaks = c(1,3,5,7,9,11), labels = c('Jan','Mar',"May","Jul","Sep","Nov")) +
-  theme_bw() + 
-  theme(axis.text.x = element_text(hjust = 1),
-        axis.text = element_text(size = 10)) +
-  facet_wrap(~MinMax, nrow = 2) + 
-  labs(x = 'Year', title = 'Distribution of maximum and minimum clarity months')
-
-#ggsave('figures/MinMaxDistributions.png', height = 2.5, width = 7.25)
-
-check <- stl.boots.mean %>%
-  filter(!is.na(trend_mean)) %>%
-  group_by(region, year) %>%
-  dplyr::summarize(month.min = first(month.min),
-            month.max = first(month.max)) %>%
-  mutate(period = ifelse(year < 2001, 1,2))
-
-t.test(check$month.min[check$period == 1], check$month.min[check$period == 2])
-t.test(check$month.max[check$period == 1], check$month.max[check$period == 2])
 
 ```
 
@@ -843,242 +864,6 @@ ggsave(paste0('figures/',mod,'RegionalCorrelates.png'), height = 7, width = 7.5,
 #   guides(linetype = guide_legend(title = '')) +
 #   #geom_smooth(span = .2, se = F) + 
 #   facet_wrap(~region, scales = 'free')
-
-## Summary fig for Anadarko
-national.median <- stl.full %>%
-  group_by(date) %>%
-  dplyr::summarize_at(vars(seasonal_mean:remainder_mean, seas.max,seas.min), mean, na.rm =T) %>%
-  mutate(seas.mag = seas.max - seas.min)
-
-stl.full %>%
-  arrange(region, year, month) %>%
-  left_join(region) %>%
-  ggplot(., aes(x = date, y = trend_mean)) +
-  geom_path(aes(group = region, color = region), alpha = .7) +
-  scale_color_viridis_d() +
-  #geom_line(data = national.median, aes(x = date, y = trend_mean, linetype = 'Median'), size = .9) +
-  geom_vline(xintercept = as.POSIXct(c("2007-01-01", "2012-01-01",'2017-01-01')), color = 'blue') +
-  geom_text(aes(x = as.POSIXct("2000-01-01"), y = 4.5, label = 'NLA Sample Points'), color = 'blue') +
-  theme_bw() +
-  labs(y = 'Water Clarity (m)', x = 'Date', title = 'Regional Trends') +
-  theme(legend.position = 'bottom',
-        legend.text = element_text(size = 8)) +
-  guides(color = guide_legend(ncol = 4, title = NULL))
-
-#ggsave('figures/huc2trends.png', width = 7, height = 5, units = 'in')
-
-```
-
-## What was previously a quick comparison to in situ values and seems to be growing.
-
-```{r}
-
-##First we do the exact same decomposition using all the field measurements we have from wqp and lagos, regardless of sattellite coincidence.  
-# We add the additional step of averaging per lake before per month because sampling is really uneven. 
-# Load in lagos and wqp data
-sites <- read_feather('../Aquasat/2_rsdata/out/unique_site_inventory.feather')
-
-wqp.lagos <- read_feather('../Aquasat/1_wqdata/out/wqp_lagos_unity.feather') %>%
-  dplyr::select(SiteID,date_unity, source, value = secchi) %>%
-  na.omit() %>%
-  filter(value > 0.01, 
-         value < 60) %>%
-  left_join(sites) %>%
-  filter(!is.na(lat)) %>%
-  mutate(year = year(date_unity),
-         month = month(date_unity)) %>%
-  group_by(year, month, SiteID, lat, long) %>%
-  dplyr::summarize(median = median(value),
-            count = n())
-
-dummy <- expand.grid(year = seq(1985,2018), 
-                     month = c(1:12), 
-                     region = unique(region$region)) %>% 
-  mutate(iceID = paste0(month,region)) %>%
-  right_join(ice.free.months %>% 
-               select(month,region, num.vis) %>% 
-               mutate(iceID = paste0(month,region)))
-
-fieldmedian <- wqp.lagos %>%
-  filter(year > 1983, year < 2019) %>%
-  st_as_sf(.,coords = c('long', 'lat'), crs = 4326) %>%
-  st_transform(., st_crs(region))%>%
-  st_join(region) %>%
-  st_set_geometry(NULL) %>%
-  group_by(year, month, region) %>%
-  dplyr::summarize(median = median(median, na.rm = T),
-            sd = sd(median, na.rm =T),
-            count.obs = sum(count),
-            count.sites = n()) %>%
-  right_join(dummy) %>%
-  arrange(region ,year, month)%>%
-  mutate(date = as.POSIXct(paste0(year,'/',month,'/',01)))
-
-ggplot(fieldmedian, aes(date, y = median, color = region)) + geom_smooth(span = .2, se = F) + labs(title = 'Smoothed SDD Trends By HUC 2')
-
-stlField <- fieldmedian %>%
-  #filter(region != 'Northern Appalachians') %>%
-  group_by(region) %>%
-  nest() %>%
-  mutate(stl = purrr::map(data, ~stlplus(x = .$median, t = .$date, n.p = .$num.vis[1], s.window = 25, sub.labels = c(1:.$num.vis[1]))),
-         date = purrr::map(stl, 'time'),
-         stl = purrr::map(stl, 'data')) %>%
-  select(-data) %>%
-  unnest() %>%
-  mutate(year = year(date)) %>%
-  group_by(year, region) %>%
-  mutate(seas.max = max(seasonal),
-         seas.min = min(seasonal),
-         seas.mag = seas.max-seas.min) %>%
-  ungroup() %>%
-  left_join(region)
-
-dummy <- expand.grid(year = seq(1984,2018), 
-                     month = c(1:12), 
-                     region = unique(region$region))
-
-## Compare RS and in situ decompositions
-stl.boots.mean %>% mutate(source = 'Remote.Sensing') %>%
-  rename(trend = trend_mean) %>%
-  mutate(date = as.POSIXct(date)) %>%
-  bind_rows(stlField %>% 
-              mutate(source = 'In.Situ') %>%
-              right_join(dummy)) %>%
-  filter(!is.na(source),
-         year > 1985, year < 2018)%>%
-  #filter(region %in% c('Great Lakes Region', 'Atlantic Gulf Region', 'New England Region', 'Pacific Northwest Region', 'Upper Colorado Region')) %>%
-  ggplot(., aes(x = date, y = trend, color = source)) +
-  geom_line() + 
-  facet_wrap(~region, scales = 'free_y', ncol = 3) +
-  theme_bw() + 
-  theme(legend.position = 'bottom') +
-  labs(title = 'Remote Sensing vs. Field Decompositions', color = 'Source', x = 'Date', y = 'Water Clarity (m)')
-
-ggsave(paste0('figures/',mod,'InSituVsRsFull.png'), height = 6, width = 6.5, units = 'in')
-
-dummy <- expand.grid(year = seq(1985,2018), month = c(1:12), region = factor(unique(region$region)))
-
-fieldmatch <- output.full %>%
-  filter(year < 2019,
-         !is.na(region)) %>%
-  rename(RS = Predicted, Field = Actual) %>%
-  gather(RS,Field, key = 'Measure', value = 'value') %>%
-  group_by(year, SiteID, Measure, month, region) %>%
-  summarise(median = median(value, na.rm = T)) %>%
-  group_by(year, Measure, month, region) %>%
-  summarise(median = median(median, na.rm = T)) %>%
-  right_join(dummy)%>%
-  arrange(region,year, month)%>%
-  mutate(date = as.POSIXct(paste0(year,'/',month,'/',01)))
-
-ggplot(fieldmatch %>% na.omit() %>%filter(year>1985,year <2018), aes(date, y = median, color = Measure)) +
-  #geom_point(alpha = .1) +
-  geom_smooth(method = 'loess', span = .2, se = F, size = .75) +
-  facet_wrap(~region, scales = 'free', ncol = 3) +
-  labs(title = 'Coincident Validation Field and RS Observations') +
-  theme_bw() +
-  theme(legend.position = 'bottom')
-
-df.full.encoded <- sr.sf %>%
-  filter(parameter == i,
-         !is.na(region),
-         value <= 15) %>%
-  mutate(value = log(value)) %>%
-  as.data.frame() %>%
-  select(-geometry)
-
-df.full.encoded <- predict(oneHot, df.full.encoded %>% select(one_of(features))) %>%
-  as.data.frame(.) %>% 
-  select(inputs)
-
-sr.preds <- sr.sf %>%
-  filter(parameter == i,
-         !is.na(region),
-         value <= 15) %>%
-  mutate(value = log(value)) %>%
-  as.data.frame() %>%
-  select(date, region, Field = value, SiteID, year, month) %>%
-  mutate(RS = exp(predict(model, df.full.encoded)),
-         Field = exp(Field))
-
-sr.preds %>% filter(year < 2019,
-         !is.na(region)) %>%
-  gather(RS,Field, key = 'Measure', value = 'value') %>%
-  group_by(year, SiteID, Measure, month, region) %>%
-  summarise(median = median(value, na.rm = T)) %>%
-  group_by(year, Measure, month, region) %>%
-  summarise(median = median(median, na.rm = T)) %>%
-  right_join(dummy)%>%
-  arrange(region,year, month)%>%
-  mutate(date = as.POSIXct(paste0(year,'/',month,'/',01))) %>%
-  na.omit() %>%
-  #filter(year>1985, year < 2018) %>%
-  ggplot(., aes(date, y = median, color = Measure)) +
-  #geom_point(alpha = .1) +
-  geom_smooth(method = 'loess', span = .2, se = F, size = .75) +
-  facet_wrap(~region, scales = 'free', ncol = 3) +
-  labs(title = 'Coincident Field and RS Observations') +
-  theme_bw() +
-  theme(legend.position = 'bottom')
-
-ggsave(paste0('figures/',mod,'InSituVsRsCoincident.png'), height = 6, width = 6.5, units = 'in')
-
-# ## Bring the two together into a figure
-# get_legend<-function(myggplot){
-#   tmp <- ggplot_gtable(ggplot_build(myggplot + theme(legend.position = 'bottom',
-#                                                      legend.background = element_rect(color = 'grey70'))))
-#   leg <- which(sapply(tmp$grobs, function(x) x$name) == "guide-box")
-#   legend <- tmp$grobs[[leg]]
-#   return(legend)
-# }
-# 
-# p2 <- matchfieldmedian %>%
-#   select(date, median, region, region, Measure) %>%
-#   na.omit()%>%
-#   filter(region %in% c('4_Great Lakes', '3_South Atlantic-Gulf', '5_Ohio', '17_Pacific Northwest', '14_Upper Colorado', '10_Missouri')) %>%
-# ggplot(., aes(date, y = median, color = Measure)) + 
-#   #geom_point(alpha = .1) +
-#   geom_smooth(method = 'loess', span = .2, se = F, size = .5) + 
-#   facet_grid(region~., scales = 'free_y') +
-#   #labs(title = 'Coincident Subsample Comparison') +
-#   theme_bw() +
-#   theme(#strip.background = element_blank(),
-#         #strip.text.x = element_blank(),
-#         axis.title = element_blank(),
-#         legend.position = 'none',
-#         axis.text.x = element_text(hjust = .75))
-# 
-# p1 <- stl.boots.mean %>% mutate(Data.Source = 'Remote.Sensing') %>%
-#   rename(trend = trend_mean) %>%
-#   left_join(regions) %>%
-#   bind_rows(stlField %>% mutate(Data.Source = 'In.Situ')) %>%
-#   filter(region %in% c('4_Great Lakes', '3_South Atlantic-Gulf', '5_Ohio', '17_Pacific Northwest', '14_Upper Colorado', '10_Missouri')) %>%
-#   ggplot(., aes(x = date, y = trend, color = Data.Source)) +
-#   geom_path(size = .5) + 
-#   facet_wrap(~region, scales = 'free_y', ncol = 1) +
-#   #labs(title = 'Full Field Sample Comparison') +
-#   theme_bw() +
-#   theme(strip.background = element_blank(),
-#         strip.text.x = element_blank(),
-#         axis.title = element_blank(),
-#         legend.position = 'none',
-#         axis.text.x = element_text(hjust = .75))
-# 
-# c1lab <- textGrob('Full Field Sample\nComparison')
-# c2lab <- textGrob('Coincident Subsample\nComparison')
-# 
-# leg <- get_legend(p1)
-# 
-# g <- grid.arrange(p1,p2, c1lab, c2lab, leg,
-#                   layout_matrix = rbind(c(5,5),
-#                                         c(3,4),
-#                                         c(1,2)),
-#                   bottom = 'Date',
-#                   left = 'Water Clarity (m)',
-#                   heights = c(.5,.5,6))
-# 
-# ggsave('figures/RSFieldComp.png', plot = g,width = 4, height = 8, units = 'in')
-
 ```
 
 
