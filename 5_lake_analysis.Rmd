@@ -199,7 +199,6 @@ summaryMK <- bootstrapped.ts %>%
          sig = ifelse(p.value < 0.1, 'yes', NA)) %>%
   select(-data, -mk)
 
-
 ## Finally plot up Man-Kendal results
 summaryMK %>%
   left_join(region) %>%
@@ -229,6 +228,7 @@ write_feather(summaryMK, paste0('out/TS_Preds/',lakeSamp,'_summaryMK.feather'))
 ## Compare remotely sensed and in situ observations
 
 ```{r}
+fieldMean <- read_feather('out/RegionalsInSituMeans.feather')
 
 meanFull <- fieldMean %>% 
   mutate(source = 'In.Situ', se = NA, bias = NA) %>%
@@ -246,10 +246,15 @@ meanFull %>%
   geom_line() +
   theme_bw() +
   #geom_point() +
-  scale_color_viridis_d(end = .6) +
-  facet_wrap(~region, scales = 'free', ncol = 2) +
-  labs(title = 'Mean and 90% confidence bound (stability)')
+  scale_color_viridis_d(end = .5) +
+  facet_wrap(~region, scales = 'free', ncol = 3) +
+  labs(title = 'Mean and 90% confidence bound (stability)', 
+       y = 'Mean Summer Clarity (m)', x = 'Year') +
+  theme(legend.position = 'bottom',# c(.75, .05),
+        legend.direction = 'horizontal',
+        axis.text.x = element_text(hjust = 1)) # c(0,0) bottom left, c(1,1) top-right.)
 
+ggsave('figures/NLA_Random_TS_wide.png', width = 6, height = 5)
 
 FieldMK <- fieldMean %>%
   group_by(region) %>%
@@ -269,14 +274,21 @@ FieldMK <- fieldMean %>%
 mk.full <- FieldMK %>%
   mutate(source = 'In.Situ') %>%
   bind_rows(read_feather('out/TS_Preds/NLA_summaryMK.feather') %>%
-              mutate(source = 'NLA')) %>%
+              mutate(source = 'NLA Sample')) %>%
   bind_rows(read_feather('out/TS_Preds/EcoReg2000_summaryMK.feather') %>%
-              mutate(source = 'Random'))
+              mutate(source = 'Random Sample'))
 
+trendDif <- mk.full %>%
+  filter(source != 'In.Situ') %>%
+  select(region, sen.slope, source) %>%
+  spread(source, sen.slope) %>%
+  mutate(sen.slope = NLA - Random) %>%
+  mutate(sig = NA, p.value = NA, source = 'Difference') %>%
+  left_join(region)
 
-mk.full %>%
+p1 <- mk.full %>%
+  filter(source != 'In.Situ') %>%
   left_join(region) %>%
-  mutate(sen.slope = ifelse(sen.slope > 3, 1.5, sen.slope)) %>%
   ggplot() +
     geom_sf(aes(fill = sen.slope, color = sig)) +
     theme(axis.text.x = element_blank(),
@@ -287,131 +299,26 @@ mk.full %>%
           legend.position = 'bottom') +
     scale_color_manual(values = 'red', breaks = 'yes') +
     scale_fill_viridis_c(option = 'cividis') +
-    labs(fill = 'Slope (cm/year)', color = 'P.Value < 0.1', title = 'MannKendall Slopes') +
+    labs(fill = 'Slope (cm/year)', color = 'P.Value < 0.1', title = 'Thiel-Sen Slopes') +
     guides(color = guide_legend(label = F)) +
   facet_wrap(~source)
 
+p2 <- ggplot(trendDif) +
+  geom_sf(aes(fill = sen.slope), color = 'grey70') +
+  theme(axis.text.x = element_blank(),
+        axis.text.y = element_blank(),
+        axis.ticks = element_blank(),
+        rect = element_blank(),
+        panel.grid.major = element_line(color = 'transparent'),
+        legend.position = 'bottom') +
+  scale_fill_gradient2(low='#a50026',mid='#abd9e9', high='#313695', 
+                       midpoint = 0, name = 'NLA minus Random\n(cm/yr)') +
+  facet_wrap(~source)+
+  ggtitle(' ')
 
-fieldmatch <- output.full %>%
-  filter(year < 2019,
-         !is.na(region)) %>%
-  rename(RS = Predicted, Field = Actual) %>%
-  gather(RS,Field, key = 'Measure', value = 'value') %>%
-  group_by(year, SiteID, Measure, month, region) %>%
-  summarise(median = median(value, na.rm = T)) %>%
-  group_by(year, Measure, month, region) %>%
-  summarise(median = median(median, na.rm = T)) %>%
-  right_join(dummy)%>%
-  arrange(region,year, month)%>%
-  mutate(date = as.POSIXct(paste0(year,'/',month,'/',01)))
+g <- grid.arrange(p1,p2, ncol = 2, widths = c(2,1))
 
-ggplot(fieldmatch %>% na.omit() %>%filter(year>1985,year <2018), aes(date, y = median, color = Measure)) +
-  #geom_point(alpha = .1) +
-  geom_smooth(method = 'loess', span = .2, se = F, size = .75) +
-  facet_wrap(~region, scales = 'free', ncol = 3) +
-  labs(title = 'Coincident Validation Field and RS Observations') +
-  theme_bw() +
-  theme(legend.position = 'bottom')
-
-df.full.encoded <- sr.sf %>%
-  filter(parameter == i,
-         !is.na(region),
-         value <= 15) %>%
-  mutate(value = log(value)) %>%
-  as.data.frame() %>%
-  select(-geometry)
-
-df.full.encoded <- predict(oneHot, df.full.encoded %>% select(one_of(features))) %>%
-  as.data.frame(.) %>% 
-  select(inputs)
-
-sr.preds <- sr.sf %>%
-  filter(parameter == i,
-         !is.na(region),
-         value <= 15) %>%
-  mutate(value = log(value)) %>%
-  as.data.frame() %>%
-  select(date, region, Field = value, SiteID, year, month) %>%
-  mutate(RS = exp(predict(model, df.full.encoded)),
-         Field = exp(Field))
-
-sr.preds %>% filter(year < 2019,
-         !is.na(region)) %>%
-  gather(RS,Field, key = 'Measure', value = 'value') %>%
-  group_by(year, SiteID, Measure, month, region) %>%
-  summarise(median = median(value, na.rm = T)) %>%
-  group_by(year, Measure, month, region) %>%
-  summarise(median = median(median, na.rm = T)) %>%
-  right_join(dummy)%>%
-  arrange(region,year, month)%>%
-  mutate(date = as.POSIXct(paste0(year,'/',month,'/',01))) %>%
-  na.omit() %>%
-  #filter(year>1985, year < 2018) %>%
-  ggplot(., aes(date, y = median, color = Measure)) +
-  #geom_point(alpha = .1) +
-  geom_smooth(method = 'loess', span = .2, se = F, size = .75) +
-  facet_wrap(~region, scales = 'free', ncol = 3) +
-  labs(title = 'Coincident Field and RS Observations') +
-  theme_bw() +
-  theme(legend.position = 'bottom')
-
-ggsave(paste0('figures/',mod,'InSituVsRsCoincident.png'), height = 6, width = 6.5, units = 'in')
-
-# ## Bring the two together into a figure
-# get_legend<-function(myggplot){
-#   tmp <- ggplot_gtable(ggplot_build(myggplot + theme(legend.position = 'bottom',
-#                                                      legend.background = element_rect(color = 'grey70'))))
-#   leg <- which(sapply(tmp$grobs, function(x) x$name) == "guide-box")
-#   legend <- tmp$grobs[[leg]]
-#   return(legend)
-# }
-# 
-# p2 <- matchfieldmedian %>%
-#   select(date, median, region, region, Measure) %>%
-#   na.omit()%>%
-#   filter(region %in% c('4_Great Lakes', '3_South Atlantic-Gulf', '5_Ohio', '17_Pacific Northwest', '14_Upper Colorado', '10_Missouri')) %>%
-# ggplot(., aes(date, y = median, color = Measure)) + 
-#   #geom_point(alpha = .1) +
-#   geom_smooth(method = 'loess', span = .2, se = F, size = .5) + 
-#   facet_grid(region~., scales = 'free_y') +
-#   #labs(title = 'Coincident Subsample Comparison') +
-#   theme_bw() +
-#   theme(#strip.background = element_blank(),
-#         #strip.text.x = element_blank(),
-#         axis.title = element_blank(),
-#         legend.position = 'none',
-#         axis.text.x = element_text(hjust = .75))
-# 
-# p1 <- stl.boots.mean %>% mutate(Data.Source = 'Remote.Sensing') %>%
-#   rename(trend = trend_mean) %>%
-#   left_join(regions) %>%
-#   bind_rows(stlField %>% mutate(Data.Source = 'In.Situ')) %>%
-#   filter(region %in% c('4_Great Lakes', '3_South Atlantic-Gulf', '5_Ohio', '17_Pacific Northwest', '14_Upper Colorado', '10_Missouri')) %>%
-#   ggplot(., aes(x = date, y = trend, color = Data.Source)) +
-#   geom_path(size = .5) + 
-#   facet_wrap(~region, scales = 'free_y', ncol = 1) +
-#   #labs(title = 'Full Field Sample Comparison') +
-#   theme_bw() +
-#   theme(strip.background = element_blank(),
-#         strip.text.x = element_blank(),
-#         axis.title = element_blank(),
-#         legend.position = 'none',
-#         axis.text.x = element_text(hjust = .75))
-# 
-# c1lab <- textGrob('Full Field Sample\nComparison')
-# c2lab <- textGrob('Coincident Subsample\nComparison')
-# 
-# leg <- get_legend(p1)
-# 
-# g <- grid.arrange(p1,p2, c1lab, c2lab, leg,
-#                   layout_matrix = rbind(c(5,5),
-#                                         c(3,4),
-#                                         c(1,2)),
-#                   bottom = 'Date',
-#                   left = 'Water Clarity (m)',
-#                   heights = c(.5,.5,6))
-# 
-# ggsave('figures/RSFieldComp.png', plot = g,width = 4, height = 8, units = 'in')
+ggsave('figures/SampleComps.png', plot = g, width = 7.5, height = 4)
 
 ```
 
@@ -435,10 +342,10 @@ mk <- summ.meds %>% filter(COMID %in% counts$COMID) %>%
          p.value = purrr::map_dbl(mk, 'p.value'),
          sig = ifelse(p.value < .1, T, F)) %>%
   select(COMID, region, sen.slope, p.value, sig) %>%
-  left_join(lake.join)
+  left_join(lake.join) %>%
+  mutate(sizeQuant = cut(areasqkm, breaks = c(0,.5,1,10,1000)))
 
-
-ggplot(mk, aes(x = sen.slope)) + geom_histogram(aes(color = sig)) + facet_wrap(~region, scales = 'free')
+ggplot(mk, aes(x = sen.slope)) + geom_density(aes(color = sizeQuant)) + facet_wrap(~region, scales = 'free')
 
 mk %>% st_as_sf(., coords = c('long','lat'), crs = 4326) %>% st_transform(st_crs(region)) %>%
   ggplot(.) +   geom_sf(data = region) + geom_sf(aes(color = sen.slope, alpha = sig)) +
@@ -506,7 +413,7 @@ p3 <- Preds.out %>%
 
 g <- grid.arrange(p1,p2, p3, nrow = 3, heights = c(.3,.35,.35))
 
-#ggsave(plot = g, 'figures/MonthlyObs3Panel_IceFree.png', width = 7, height = 9, units = 'in')
+ggsave(plot = g, 'figures/MonthlyObs3Panel_IceFree.png', width = 7, height = 9, units = 'in')
 
 ## Take a look at individual lake ts and regional medians
 ggplot() + 
@@ -586,65 +493,14 @@ ggplot() +
 
 ```{r}
 #Between watershed stability correlations
-stability <- stl.boots.mean %>%
-  as.data.frame() %>%
+stability <- bootstrapped.ts %>%
   group_by(region) %>%
-  dplyr::summarize_at(vars(seasonal_mean:trend_sd), mean, na.rm = T) %>%
-  column_to_rownames('region') %>%
-  as.matrix() %>%
-  rcorr(.)
+  nest() %>%
+  mutate(stability.cor = purrr::map(data, ~cor(.$mean, .$se)),
+         time.stab.cor = purrr::map(data, ~cor(.$se, .$year)))
 
-#Overall stability correlations
-stability <- stl.boots.mean %>%
-  as.data.frame() %>%
-  select(raw_mean:trend_sd) %>%
-  na.omit() %>%
-  #column_to_rownames('region') %>%
-  as.matrix() %>%
-  rcorr(.)
-
-# Mean stability
-check <- stl.boots.mean %>% group_by(region) %>% dplyr::summarise(sd = mean(trend_sd, na.rm = T)) %>% arrange(sd)
-
-#mean(check$sd)
-
-check <- stl.boots.mean %>% group_by(region, year) %>% 
-  dplyr::summarise(sd.trend = mean(trend_sd, na.rm = T),
-                   sd.seas = mean(seasonal_sd, na.rm = T)) %>%
-  gather(sd.trend:sd.seas, key = 'sd', value = 'value')
-
-#ggplot(check %>% filter(sd == 'sd.trend'), aes(x = year, y = value, color = region)) + geom_line()
-
-cor(lm.summ$estimate[lm.summ$term == "date"],lm.summ$estimate[lm.summ$term == "(Intercept)"])
-lm.summ %>%
-  kable(.) %>%
-  kable_styling(.)
-
-lmTrend %>%
-  rowwise() %>%
-  mutate(coords.x = st_centroid(geometry)[1],
-    coords.y = st_centroid(geometry)[2]) %>%
-  ungroup() %>%
-  #arrange(as.numeric(HUC_2)) %>%
-  ggplot() +
-    geom_sf(aes(fill = slope.cmyr, color = sig)) +
-    geom_text(aes(x = coords.x, y = coords.y, label = region), color = 'white') +
-    theme(axis.text.x = element_blank(),
-          axis.text.y = element_blank(),
-          axis.ticks = element_blank(),
-          axis.title = element_blank(),
-          rect = element_blank(),
-          panel.grid.major = element_line(color = 'transparent'),
-          legend.position = 'bottom') +
-    scale_color_manual(values = '#ff726f', breaks = 'yes') +
-    scale_fill_viridis_c(option = 'cividis') +
-    labs(fill = 'Mean Slope\n(cm/year)', color = 'P.Value < 0.05', title = 'Linear Regression Slopes') +
-    guides(color = guide_legend(label = F), fill = guide_colorbar(title.hjust = .5))
-
-ggsave(paste0('figures/', mod,'_lmMap.png'), width = 4, height = 5, dpi = 300) 
-
-# g <- ggplot_build(lmMap)
-# colors = g$data[[1]]["fill"]
+ggplot(bootstrapped.ts, aes(x = year, y = se)) + geom_point() + geom_smooth(method = lm) + facet_wrap(~region, scales = 'free') +
+  ggtitle('Trend Stability Over Time')
 
 ```
 
@@ -723,10 +579,20 @@ detach("package:raster", unload = TRUE)
 
 
 ```{r, include = F, eval = F}
-prismTemps <- read_feather(paste0('out/PRISMTemp_',area,'.feather')) %>%
-  rename_all(tolower)
-prismPrecip <- read_feather(paste0('out/PRISMPrecip_',area,'.feather')) %>%
-  rename_all(tolower)
+prismTemps <- read_feather('out/PRISMTemp_eco.feather') %>%
+  rename_all(tolower) %>%
+  mutate_at(vars(year,month), as.numeric) %>%
+  filter(month %in% c(5:9)) %>%  
+  group_by(region, year) %>%
+  summarise(value = mean(value, na.rm = T))
+  
+
+prismPrecip <- read_feather('out/PRISMPrecip_eco.feather') %>%
+  rename_all(tolower) %>%
+  mutate_at(vars(year,month), as.numeric) %>%
+  filter(month %in% c(5:9)) %>%  
+  group_by(region, year) %>%
+  summarise(value = mean(value, na.rm = T))
 
 
 ## Pull in the NADP Data
@@ -735,38 +601,42 @@ nadp.sites <- read.csv('../aquaModel/in/NADP/siteList.csv') %>%
   st_as_sf(coords = c('long','lat'), crs = 4326) %>%
   st_transform(.,st_crs(region)) %>%
   st_join(region)
+  
 
 #ggplot(nadp.sites) +  geom_sf(data =usa) + geom_sf()
 
-nadp.monthly <- read.csv('../aquaModel/in/NADP/NTN-All-m.csv') %>%
+nadp.yearly <- read.csv('../aquaModel/in/NADP/NTN-All-m.csv') %>%
   left_join(nadp.sites, by = 'SiteID') %>%
   rename(year = yr) %>%
   select(-c(Criteria1:Criteria3, fullChemLab, svol, ppt, daysSample, elev)) %>%
-  group_by(region, year, month) %>%
-  dplyr::summarize_if(is.numeric, median, na.rm = T)
+  filter(month %in% c(5:9)) %>%
+  group_by(region, year) %>%
+  dplyr::summarize_if(is.numeric, mean, na.rm = T)
+  
 
 
 ##Teleconnection Indexes
 tc <- read.csv('../aquaModel/in/IsoPdo.csv') %>%
   mutate(year = as.numeric(substr(YrMonth, 1,4)),
-         month = as.numeric(substr(YrMonth, 5,6)))
+         month = as.numeric(substr(YrMonth, 5,6))) %>%
+  filter(month %in% c(5:9)) %>%
+  group_by(year) %>%
+  summarise_at(vars(PDO, PNA, SOI, NAO), mean)
 
 
 ## Make a master dataset of all the stl, nadp, and prism data.
-stl.full <- stl.boots.mean %>%
-  left_join(nadp.monthly) %>%
-  left_join(prismTemps %>% rename(Temp = value) %>%
-              left_join(prismPrecip %>% rename(Precip = value)) %>%
-              mutate_at(vars(year:month), as.numeric)) %>%
-  left_join(tc) %>%
-  mutate(date = as.POSIXct(paste0(year,'/',month,'/',01)))
+bootstrapped.full <- bootstrapped.ts %>%
+  left_join(nadp.yearly) %>%
+  left_join(prismTemps %>% rename(Temp = value)) %>%
+  left_join(prismPrecip %>% rename(Precip = value)) %>%
+  left_join(tc)
 
-write_feather(stl.full, paste0('out/stlFullDataSecchi_',area,'.feather'))
+write_feather(bootstrapped.full, paste0('out/bootstrappedFull_',iteration,'.feather'))
 ```
 
 
 ```{r}
-stl.full <- read_feather(paste0('out/stlFullDataSecchi_',area,'.feather'))
+bootstrapped.full <- read_feather(paste0('out/stlFullDataSecchi_',area,'.feather'))
 
 # Just take a look at the data a little  
 # p <- stl.full %>%
@@ -780,13 +650,12 @@ stl.full <- read_feather(paste0('out/stlFullDataSecchi_',area,'.feather'))
 # ggplotly(p)
 
 #Look at overall correlation
-corr.t <- stl.full %>%
-  filter(!is.na(trend_mean)) %>%
-  select(region, raw_mean, remainder_mean, trend_mean, seasonal_mean, NH4, NO3, SO4, pH, PDO, PNA, NAO, Precip, Temp) %>%
+corr.t <- bootstrapped.full %>%
+  select(region, mean, NH4, NO3, SO4, pH, PDO, PNA, NAO, Precip, Temp) %>%
   gather(NH4:Temp, key = 'Metric', value = 'Conc') %>%
   group_by(region, Metric) %>%
   nest() %>%
-  mutate(cors = purrr::map(data, ~cor.test(x = .x$trend_mean, y = .x$Conc)),
+  mutate(cors = purrr::map(data, ~cor.test(x = .x$mean, y = .x$Conc)),
          cor = purrr::map(cors, 'estimate'),
          cor = purrr::map_dbl(cor, 'cor'),
          p.value = purrr::map_dbl(cors, 'p.value')) %>%
@@ -794,49 +663,15 @@ corr.t <- stl.full %>%
   mutate_at(vars(cor:p.value), round, digits =3) %>%
   mutate(sig = ifelse(p.value < .05, 'yes', NA),
          Metric = factor(Metric, levels = c('Temp', 'Precip', 'NO3', 'NH4', 'SO4', 'pH', 'PNA', 'PDO', 'NAO')),
-         signal = 'Trend')
+         signal = 'Trend') %>%
+  left_join(region)
 
-corr.r <- stl.full %>%
-  filter(!is.na(trend_mean)) %>%
-  select(region, raw_mean, remainder_mean, trend_mean, seasonal_mean, NH4, NO3, SO4, pH, PDO, PNA, NAO, Precip, Temp) %>%
-  gather(NH4:Temp, key = 'Metric', value = 'Conc') %>%
-  group_by(region, Metric) %>%
-  nest() %>%
-  mutate(cors = purrr::map(data, ~cor.test(x = .x$remainder_mean, y = .x$Conc)),
-         cor = purrr::map(cors, 'estimate'),
-         cor = purrr::map_dbl(cor, 'cor'),
-         p.value = purrr::map_dbl(cors, 'p.value')) %>%
-  select(-c(data, cors))%>%
-  mutate_at(vars(cor:p.value), round, digits =3) %>%
-  mutate(sig = ifelse(p.value < .05, 'yes', NA),
-         Metric = factor(Metric, levels = c('Temp', 'Precip', 'NO3', 'NH4', 'SO4', 'pH', 'PNA', 'PDO', 'NAO')),
-         signal = 'Remainder')
-
-corr.full <- stl.full %>%
-  filter(!is.na(trend_mean)) %>%
-  select(region, raw_mean, remainder_mean, trend_mean, seasonal_mean, NH4, NO3, SO4, pH, PDO, PNA, NAO, Precip, Temp) %>%
-  gather(NH4:Temp, key = 'Metric', value = 'Conc') %>%
-  group_by(region, Metric) %>%
-  nest() %>%
-  mutate(cors = purrr::map(data, ~cor.test(x = .x$seasonal_mean, y = .x$Conc)),
-         cor = purrr::map(cors, 'estimate'),
-         cor = purrr::map_dbl(cor, 'cor'),
-         p.value = purrr::map_dbl(cors, 'p.value')) %>%
-  select(-c(data, cors))%>%
-  mutate_at(vars(cor:p.value), round, digits =3) %>%
-  mutate(sig = ifelse(p.value < .05, 'yes', NA),
-         Metric = factor(Metric, levels = c('Temp', 'Precip', 'NO3', 'NH4', 'SO4', 'pH', 'PNA', 'PDO', 'NAO')),
-         signal = 'Seasonal') %>%
-  bind_rows(corr.t) %>%
-  bind_rows(corr.r) %>%
-  right_join(region)
-
-corr.full %>%
+corr.t %>%
   filter(Metric %in% c('SO4', 'Temp', 'Precip', 'PDO')) %>%
   st_as_sf() %>%
   st_simplify(., dTolerance = 1000) %>%
   ggplot(.) +  geom_sf(aes(fill = cor, color = sig)) + 
-  facet_grid(signal~Metric) + 
+  facet_wrap(~Metric) + 
   scale_fill_gradient2(low = 'red', high = 'blue', mid = 'grey', midpoint = 0) +
   scale_color_manual(values = 'black', na.translate = F) +
   theme(axis.text.x = element_blank(),
@@ -851,7 +686,7 @@ corr.full %>%
 ggsave(paste0('figures/',mod,'RegionalCorrelates.png'), height = 7, width = 7.5, units = 'in')
 
 ## Plotly code for zooming in and looking at the data
-# stl.full %>%
+# bootstrapped.full %>%
 #   select(region, date, raw_mean, remainder_mean, trend_mean, seasonal_mean, NH4, SO4, pH, PDO, Precip, Temp) %>% #, NAO, PNA, NO3,) %>%
 #   group_by(region) %>%
 #   mutate_at(vars(raw_mean:Temp), scale) %>%
@@ -891,7 +726,7 @@ cor <- stl.boots.mean %>%
 
 
 ## Look at lagged cross correlations
-ccf <- stl.full %>%
+ccf <- bootstrapped.full %>%
   select(region, trend, seasonal, NH4, NO3, SO4, pH, PDO, ISO, Precip, Temp) %>%
   gather(NH4:Temp, key = 'Metric', value = 'Conc') %>%
   group_by(region, Metric) %>%

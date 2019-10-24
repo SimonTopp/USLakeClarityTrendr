@@ -386,7 +386,8 @@ lsCompsPre <- read_feather('out/srMunged.feather') %>%
          !is.na(CatAreaSqKm)) %>%
   mutate(NR = nir/red,
          BG = blue/green,
-         dWL = fui.hue(red, green, blue))
+         dWL = fui.hue(red, green, blue)) %>%
+  select()
 
 
 ##First, compare landsat 5 to landsat 7.  We'll limit the comparison to coincident dates when both satellites were in the air.  Theoretically these distributions should be the same.
@@ -407,7 +408,7 @@ lsCompsPre %>% filter(year > 2012) %>% gather(red, blue, green, nir, NR, BG, dWL
 
 lsCompsPre %>% filter(year > 2012) %>% gather(red, blue, green, nir, NR, BG, dWL, key = 'Band', value = 'value') %>%
   group_by(sat, Band) %>%
-  summarise(med = median(value)) %>%
+  summarise(med = mean(value)) %>%
   spread(sat, med) %>%
   mutate(satDiff = `7` - `8`)
 
@@ -416,13 +417,13 @@ lsCompsPost <- read_feather('out/srMunged.feather') %>%
   filter(parameter == 'secchi',
          value <= 10,
          !is.na(CatAreaSqKm)) %>%
-  mutate(nir = ifelse(sat == '5', nir - 58, ifelse(sat == '8', nir + 83, nir)),
-         red = ifelse(sat == '5', red - 38, ifelse(sat == '8', red + 33, red)),
-         blue = ifelse(sat == '5', blue - 9, ifelse(sat == '8', blue + 45, blue)),
+  mutate(blue = ifelse(sat == '5', blue - 9, ifelse(sat == '8', blue + 45, blue)),
+         dWL = fui.hue(red, green, blue),
          green = ifelse(sat == '5', green - 36, ifelse(sat == '8', green + 29, green)),
+         nir = ifelse(sat == '5', nir - 58, ifelse(sat == '8', nir + 83, nir)),
+         red = ifelse(sat == '5', red - 38, ifelse(sat == '8', red + 33, red)),
          NR = nir/red,
-         BG = blue/green,
-         dWL = fui.hue(red, green, blue))
+         BG = blue/green)
 
 ## Before and after figures
 #5 and 7
@@ -447,6 +448,105 @@ g <- grid.arrange(p1,p2, ncol = 1, heights = c(5,3))
 ggsave('figures/7_8_CorrectionsComps.png', g, width = 4, height = 6, units = 'in')
 
 ## They look way better
+lakes.join <- read_feather('out/EcoReg2000LakesFull.feather')
+size.check <- lake.join %>% mutate(lakearea = as.numeric(as.character(lakearea))/1000000) %>% filter(lakearea > 0.01)
+
+###### Do the same thing but with the reflectance values from the large lake pull
+files <- list.files('lake_data/NLA2012/', full.names = T)
+refCompPre <- purrr::map_dfr(files, read.csv, stringsAsFactors = F) %>%
+  filter(!is.na(blue),
+         dswe == 1,
+         dswe_sd < .4,
+         hillshadow == 1,
+         cScore == 0,
+         Cloud_Cover < 50,
+         pixelCount > 8) %>%
+  filter_at(vars(red, blue, green, nir, swir1, swir2), all_vars(.>0 & .<2000)) %>%
+  mutate(dWL = fui.hue(red, green, blue),
+         date = ymd_hms(date),
+         year = year(date),
+         sat = factor(sat),
+         source = 'random') %>%
+  select(year, blue, red, green, nir, dWL, sat, source, COMID)
+
+## Make sure we have at least 10 years of data from each included waterbody, this removes small, ephemeral, noisy bodies
+## that won't be included in the final analysis anyways.
+counts <- refCompPre %>% filter(source == 'random') %>% group_by(COMID, year) %>% summarise(count = n()) %>% group_by(COMID) %>% summarise(count = n()) %>%
+  filter(count > 10)
+
+refCompPre <- refCompPre %>% filter(COMID %in% counts$COMID) %>%
+  bind_rows(lsCompsPre %>% mutate(source = 'AquaSat') %>% select(year, blue, red, green, nir, dWL, sat, source, COMID))
+
+refCompPre %>%
+  mutate(BG = blue/green, NR = nir/red) %>%
+  filter(year > 1999, year < 2012) %>%
+  gather(red, blue, green, nir, dWL, key = 'Band', value = 'value') %>%
+  ggplot(., aes(x = value, color = sat, linetype = source)) + 
+  geom_freqpoly(stat = 'density') + facet_wrap(~Band, scales = 'free')  +
+  ggtitle("Reflectance differences b/w AquaSat and Random Pull 5/7")
+
+## Calculate differences between 5 and 7 for Full lakes
+refCompPre %>% filter(year > 1999, year < 2012, source == 'random') %>% gather(red, blue, green, nir, dWL, key = 'Band', value = 'value') %>%
+  group_by(sat, Band) %>%
+  summarise(med = median(value)) %>%
+  spread(sat, med) %>%
+  mutate(satDiff = `7` - `5`)
+
+refCompPre%>%
+  filter(year > 2012) %>% 
+  gather(red, blue, green, nir, dWL, key = 'Band', value = 'value') %>%
+  ggplot(., aes(x = value, color = sat, linetype = source)) + 
+  geom_density() + facet_wrap(~Band, scales = 'free') 
+
+## Calculate differences between 7 and 8
+refCompPre %>% filter(year > 2012, source == 'random') %>% gather(red, blue, green, nir, dWL, key = 'Band', value = 'value') %>%
+  group_by(sat, Band) %>%
+  summarise(med = median(value)) %>%
+  spread(sat, med) %>%
+  mutate(satDiff = `7` - `8`)
+
+
+refCompPost <- refCompPre %>%
+  mutate(blue = ifelse(sat == '5', blue - 2, ifelse(sat == '8', blue + 77, blue)),
+         green = ifelse(sat == '5', green - 30, ifelse(sat == '8', green + 53, green)),
+         nir = ifelse(sat == '5', nir - 20, ifelse(sat == '8', nir + 139, nir)),
+         red = ifelse(sat == '5', red - 32, ifelse(sat == '8', red + 59, red)),
+         NR = nir/red,
+         BG = blue/green,
+         dWL = fui.hue(red, green, blue))
+
+
+## Before and after figures
+#5 and 7
+p1 <- refCompPre %>% filter(year > 1999, year < 2012) %>% gather(red, blue, green, nir, key = 'Band', value = 'value') %>% mutate(correction = 'Pre.Correction') %>% 
+  bind_rows(refCompPost %>% filter(year > 1999, year < 2012) %>% gather(red, blue, green, nir, key = 'Band', value = 'value') %>% mutate(correction = 'Post.Correction')) %>%
+  ggplot(., aes(x = value, color = sat, linetype = source)) + geom_density() + facet_grid(Band~correction, scales = 'free') + scale_color_viridis_d(end = .3) + theme_bw() + theme(legend.position = 'none') + ggtitle('Landsat 5 and 7 SR Distributions')
+
+p2 <- refCompPre %>% filter(year > 1999, year < 2012) %>% mutate(value = dWL, Band = 'dWL', correction = 'Pre.Correction') %>% bind_rows(refCompPost %>% filter(year > 1999, year < 2012) %>% mutate(value = dWL, Band = 'dWL', correction = 'Post.Correction')) %>%  ggplot(., aes(x = value, color = sat, linetype = source)) + geom_density() + facet_grid(Band~correction, scales = 'free') + scale_color_viridis_d(end = .3) + theme_bw() + theme(legend.position = 'none') + ggtitle('Resulting Dominant Wavelength')
+
+p3 <- refCompPre %>% filter(year > 1999, year < 2012) %>% mutate(BG = blue/green, NR = nir/red, correction = 'Pre.Correction') %>%
+  gather(NR,BG, key = 'Band', value = 'value') %>% bind_rows(refCompPost %>% filter(year > 1999, year < 2012) %>% mutate(BG = blue/green, NR = nir/red, correction = 'Post.Correction') %>% gather(NR,BG, key = 'Band', value = 'value')) %>%  ggplot(., aes(x = value, color = sat, linetype = source)) + geom_density() + facet_grid(Band~correction, scales = 'free') + scale_color_viridis_d(end = .3) + theme_bw() + theme(legend.position = 'bottom') + scale_x_continuous(limits = c(0,3)) + ggtitle('Resulting Ratios')
+
+g <- grid.arrange(p1,p2,p3, ncol = 1, heights = c(5,3,4))
+
+ggsave('figures/5_7_CorrectionsComps_NLA.png', g, width = 4, height = 9, units = 'in')
+
+
+## 7 and 8
+p1 <- refCompPre %>% filter(year > 2012) %>% gather(red, blue, green, nir, key = 'Band', value = 'value') %>% mutate(correction = 'Pre.Correction') %>% 
+  bind_rows(refCompPost %>% filter(year > 2012) %>% gather(red, blue, green, nir, key = 'Band', value = 'value') %>% mutate(correction = 'Post.Correction')) %>%
+  ggplot(., aes(x = value, color = sat, linetype = source)) + geom_density() + facet_grid(Band~correction, scales = 'free') + scale_color_viridis_d(begin = .3, end = .7) + theme_bw() + theme(legend.position = 'none') + ggtitle('Landsat 7 and 8 SR Distributions')
+
+p2 <- refCompPre %>% filter(year > 2012) %>% mutate(value = dWL, Band = 'dWL', correction = 'Pre.Correction') %>% bind_rows(refCompPost %>% filter(year > 2012) %>% mutate(value = dWL, Band = 'dWL', correction = 'Post.Correction')) %>%  ggplot(., aes(x = value, color = sat, linetype = source)) + geom_density() + facet_grid(Band~correction, scales = 'free') + scale_color_viridis_d(begin = .3, end = .7) + theme_bw() + theme(legend.position = 'none') + ggtitle('Resulting Dominant Wavelength')
+
+p3 <- refCompPre %>% filter(year > 2012) %>% mutate(BG = blue/green, NR = nir/red, correction = 'Pre.Correction') %>%
+  gather(NR,BG, key = 'Band', value = 'value') %>% bind_rows(refCompPost %>% filter(year > 2012) %>% mutate(BG = blue/green, NR = nir/red, correction = 'Post.Correction') %>% gather(NR,BG, key = 'Band', value = 'value')) %>%  ggplot(., aes(x = value, color = sat, linetype = source)) + geom_density() + facet_grid(Band~correction, scales = 'free') + scale_color_viridis_d(end = .3) + theme_bw() + theme(legend.position = 'bottom') + scale_x_continuous(limits = c(0,3)) + ggtitle('Resulting Ratios')
+
+g <- grid.arrange(p1,p2,p3, ncol = 1, heights = c(5,3,4))
+
+
+ggsave('figures/7_8_CorrectionsComps_NLA.png', g, width = 4, height = 9, units = 'in')
+
 ```
 
 ## Finally take a look at the correlations between various bands/ratios and AOD

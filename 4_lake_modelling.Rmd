@@ -38,7 +38,7 @@ library(trend)
 ```{r}
 # Bring in all the necessary stoof
 iteration = 'FFS_DistNorm_noLn_Secchi'
-lakeSamp = 'NLA'
+lakeSamp = 'EcoReg2000'
 log = F
 region = st_read('in/NLA/NLA_Ecoregions/EcoRegsMerged.shp')
 load(paste0('models/',iteration,'.Rdata'))
