@@ -791,25 +791,65 @@ hist(df$value)
 
 
 ```{r, include = F, eval = F, echo = F}
+files.cntr <- list.files('lake_data/NLA2012_cntr/')
+files.lake <- list.files('lake_data/NLA2012/')
+files.lake <- files.lake[files.lake %in% files.cntr]## for now since the center pull is incomplete
+files.cntr <- list.files('lake_data/NLA2012_cntr/', full.names = T)
+files.lake <- paste0('lake_data/NLA2012/',files.lake)
+
+ref.comps <- purrr::map_dfr(files.cntr, read.csv, stringsAsFactors = F) %>% mutate(source = 'CenterPoints') %>%
+  bind_rows(purrr::map_dfr(files.lake, read.csv, stringsAsFactors = F) %>% mutate(source = 'LakePolys')) %>%
+  filter(!is.na(blue), cScore < .3, Cloud_Cover < 50, pixelCount > 4, dswe == 1, dswe_sd < .4, hillshadow == 1) %>%
+  filter_at(vars(red, blue, green, nir), all_vars(.>0 & .< 2000)) %>%
+  select(red, blue, green, nir, sat, date, COMID, source) %>% 
+  mutate(NR = nir/red, BG = blue/green, dWL = fui.hue(red, green, blue), COMID = factor(COMID))
+
+ref.comps %>% 
+  group_by(COMID) %>%
+  sample_frac(.5) %>%
+  filter(NR < 5, BG < 2) %>%
+  gather(red, blue, green, nir, dWL, NR, BG, key = 'Band', value = 'value') %>% 
+  ggplot(., aes(x = value, color = source)) + geom_density() + facet_wrap(~Band, scales = 'free') + scale_color_viridis_d(end = .6) + theme_bw() + ggtitle('Comparison of Center Point and Lake Poly Pulls') +
+  theme(legend.position = c(.7, .1))
+
+ggsave('figures/CntrPolyComps.png', width = 4, height = 4, units = 'in')
+
+ref.comps %>% 
+  group_by(COMID) %>%
+  gather(red, blue, green, nir, dWL, key = 'Band', value = 'value') %>%
+  group_by(Band, source) %>%
+  summarise(mean = mean(value)) %>%
+  spread(source, mean) %>%
+  mutate(sourceDiff = LakePolys - CenterPoints)
 
 
-check <- brCheck %>% filter(location == 'DDV')
+ref.summs <- ref.comps %>% 
+  group_by(COMID, source) %>%
+  summarise_at(vars(blue, green, red, nir), mean) %>%
+  gather(blue, green, red, nir, key = 'Band', value = 'value') %>%
+  spread(source, value) %>%
+  mutate(lakeDiff = CenterPoints - LakePolys) %>%
+  left_join(lake.join %>% select(COMID, areasqkm, meandused))
 
 
-prismTemps <- read_feather(paste0('out/PRISMTemp_',area,'.feather')) %>%
-  rename_all(tolower)
-prismPrecip <- read_feather(paste0('out/PRISMPrecip_',area,'.feather')) %>%
-  rename_all(tolower)
+ggplot(ref.summs, aes(x = areasqkm, y = lakeDiff)) + geom_hex() + geom_smooth(method = 'lm') + scale_x_log10() + scale_y_continuous(limits = c(-150, 150)) + facet_wrap(~Band, scales = 'free')
 
-prismTemps %>%
-  mutate(year = as.numeric(year)) %>%
-  filter(year < 2019) %>%
-  group_by(year, region) %>%
-  summarise(temp = mean(value, na.rm = T)) %>%
-  ggplot(., aes(x = year, y = temp)) + 
-  geom_point() +
-  geom_smooth(se = F, span = .2) +
-  facet_wrap(~region, scales = 'free') +
-  ggtitle('Prism Temp Record')
+ggplot(ref.summs, aes(x = lakeDiff)) + geom_histogram() + facet_wrap(~Band, scales = 'free') + scale_x_continuous(limits = c(-150, 150))
 
+ggplot(ref.summs, aes(x = Band, y = lakeDiff)) + geom_violin(draw_quantiles = c(.25,.5,.75)) +  scale_y_continuous(limits = c(-150, 150)) + theme_bw() + ggtitle('Distribution of Mean Ref. Diffs. by Band')
+
+ggplot(ref.summs, aes(x = LakePolys, y = CenterPoints)) + geom_hex() + geom_abline(color = 'red') + facet_wrap(~Band, scales = 'free') + scale_x_log10() + scale_y_log10() + ggtitle('Lake Polygon Reflectance vs. CenterPoints')
+
+
+t.test(ref.comps$red[ref.comps$source == 'CenterPoints'], ref.comps$red[ref.comps$source == 'LakePolys'])
+t.test(ref.comps$blue[ref.comps$source == 'CenterPoints'], ref.comps$blue[ref.comps$source == 'LakePolys'])
+t.test(ref.comps$green[ref.comps$source == 'CenterPoints'], ref.comps$green[ref.comps$source == 'LakePolys'])
+t.test(ref.comps$nir[ref.comps$source == 'CenterPoints'], ref.comps$nir[ref.comps$source == 'LakePolys'])
+t.test(ref.comps$BG[ref.comps$source == 'CenterPoints'], ref.comps$BG[ref.comps$source == 'LakePolys'])
+
+check <- ref.summs %>%
+  group_by(Band) %>%
+  nest() %>%
+  mutate(cor = purrr::map(data, ~cor(.$meandused), .$lakeDiff, use = 'complete.obs')))
+g
 ```

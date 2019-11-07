@@ -28,7 +28,8 @@ library(furrr)
 nhdLakes <- st_read('D:/GIS_Data/NHD/nhdPlusV2_WaterBodiesFull.shp') %>%
   filter(FTYPE == 'LakePond' | FTYPE == 'Reservoir',
          AREASQKM >= .01, ##Make sure they're landsat visible
-         AREASQKM < 4000)  ##Exclude the Great lakes
+         AREASQKM < 4000)##Exclude the Great lakes
+
 
 ## Load in our region variable
 region = st_read('in/NLA/NLA_Ecoregions/EcoRegsMerged.shp') %>%
@@ -52,7 +53,7 @@ counts <- nhd.join %>%
   summarize(count = n())
 
 # We'll do two pulls, first a random sample of 2,000 lakes per region and then a specific pull using just the NLA 2012 lakes because they're supposedly a statistically representative sample.  The rounding is formatting for writing to a shapefile.
-set.seed(4453)
+set.seed(444743)
 sample <- nhd.join %>%
   group_by(region) %>%
   sample_n(2000) %>%
@@ -83,6 +84,41 @@ NLAsample <- nhd.join %>% filter(COMID %in% nlaSamp$COMID2012) %>%
 st_write(NLAsample, 'out/sampleLakes/NLA2012.shp')
 st_write(sample, 'out/sampleLakes/EcoReg2000.shp')
 
+##Make second centroid version of sample
+sample <- st_read('out/sampleLakes/EcoReg2000.shp')
+sample_cntr <- sample %>%
+  st_transform(102003) %>%##Albers equal area is in meters
+  st_point_on_surface() %>%
+  st_buffer(120) %>%
+  st_transform(4326) ##WGS84 for EE
+
+st_write(sample_cntr, 'out/sampleLakes/EcoReg2000_cntr.shp')
+
+## As a test, make centerpoints/disks
+nla.ply <- st_read('out/sampleLakes/NLA2012.shp')
+
+st_centroid_within_poly <- function (poly) {
+
+  # check if centroid is in polygon
+  centroid <- poly %>% st_centroid() 
+  in_poly <- st_within(centroid, poly, sparse = F)[[1]] 
+
+  # if it is, return that centroid
+  if (in_poly) return(centroid) 
+
+  # if not, calculate a point on the surface and return that
+  centroid_in_poly <- st_point_on_surface(poly) 
+  return(centroid_in_poly)
+}
+
+#If the centroid  is within the polygon, use that, otherwise use 
+nla.pt <- nla.ply %>%
+  st_transform(102003) %>% ##Albers equal area is in meters
+  st_point_on_surface()%>%
+  st_buffer(120) %>%
+  st_transform(4326)
+
+st_write(nla.pt, 'out/sampleLakes/NLA2012_cntr.shp')
 
 # sample <- st_read('out/sampleLakes/EcoReg2000.shp')
 # write_feather(sample %>%
@@ -105,7 +141,7 @@ cc <- viridis(18)
 # huc2s <- hucs %>% st_transform(.,2163) %>% group_by(REGION) %>% summarise(h2 = first(HUC_2)) %>% mutate(Label = paste0(h2,'_',REGION), levels = h2, REGION = gsub(' Region', '', REGION), REGION = reorder(REGION, as.numeric(h2)))
 
 ggplot() + 
-  geom_sf(data = region, aes(fill = region)) +
+  geom_sf(data = region %>% st_simplify(dTolerance = 500), aes(fill = region)) +
   geom_sf(data = lakes.sf, alpha = .7, size = .6) +
   #geom_sf(data = huc2s %>% filter(region == 'Tennessee'), color = 'cyan', fill = 'transparent', size = 1.5) +
   scale_fill_viridis_d() +
@@ -116,9 +152,54 @@ ggplot() +
         legend.position = 'bottom',
         legend.title = element_blank()) +
   guides(fill = guide_legend(ncol = 3)) +
-  ggtitle('NLA 2012 Sample Lakes and Ecoregions')
+  ggtitle('Random 18,000 Lake Sample and Ecoregions')
 
-ggsave('figures/sampleLakesHuc2CAHighlight.png', width = 5, height = 6, units = 'in')
+ggsave('figures/sampleNLA2012.png', width = 5, height = 6, units = 'in')
+
+## Pull out the NHD 2007 lakes for validation
+nla.2007 <- read.csv('in/NLA/nla2007_secchi_20091008.txt', stringsAsFactors = F) %>%
+  select(SITE_ID, secchi = SECMEAN, date = DATE_SECCHI) %>%
+  left_join(read.csv('in/NLA/nla2007_sampledlakeinformation_20091113.txt') %>%
+              select(SITE_ID, COMID2007 = COM_ID, region = WSA_ECO9, 
+                     lat = LAT_DD, long = LON_DD))
+
+nla2007.lakes <- nla.2007 %>% st_as_sf(coords = c('long','lat'), crs = 4269) %>%
+  st_join(nhdLakes %>% st_transform(4269)) %>%
+  st_transform(102003) %>% ##Albers equal area is in meters
+  st_buffer(120) %>%
+  st_transform(4326) %>%# back to WGS84 for EarthEngine
+  rename_at(vars(FDATE:LakeArea), tolower) %>%
+  mutate_at(vars(shape_leng, shape_area, meandepth, lakearea),
+            ~format(round(., 3), nsmall = 3)) %>%
+  mutate(lakevolume = format(round(lakevolume, 2), nsmall = 2),
+         COMID = factor(COMID))
+
+st_write(nla2007.lakes, 'out/sampleLakes/NLA2007_cntr.shp')
+
+lakes.join.out <- st_read('out/sampleLakes/NLA2007_cntr.shp') %>%
+  st_set_geometry(NULL)
+
+write_feather(lakes.join.out, 'out/lakesNLA2007.feather')
+
+## Over 10
+over10 <- nhdLakes %>% filter(AREASQKM > 10) %>%
+  #sample_n(500) %>%
+  rename_at(vars(FDATE:LakeArea), tolower) %>%
+  mutate_at(vars(shape_leng, shape_area, meandepth, lakearea), ~format(round(., 3), nsmall = 3)) %>%
+  mutate(lakevolume = format(round(lakevolume, 2), nsmall = 2),
+         COMID = factor(COMID)) %>%
+  st_transform(102003) %>%##Albers equal area is in meters
+  st_point_on_surface() %>%
+  st_buffer(120) %>%
+  st_transform(4326) %>%
+  st_join(., region %>% st_transform(4326), st_nearest_feature) ##WGS84 for EE
+
+st_write(over10, 'out/sampleLakes/Over10sqkm_cntr.shp')
+
+lakes.out <- over10 %>%
+  st_set_geometry(NULL)
+
+write_feather(lakes.out, 'out/Over10sqkm_cntr.feather')  
 
 #use_python('/usr/local/bin/python2', required = T)
 use_condaenv('earthEngineGrabR')
@@ -218,11 +299,11 @@ print('done')
 # Download files to local directory
 
 ```{r}
-files <- drive_ls('aquaModel_lakesEcoReg2000_nemer88')
-files <- files %>% filter(!name %in% list.files('lake_data/EcoReg2000'))
+files <- drive_ls('aquaModel_lakesNLA2007_cntr')
+files <- files %>% filter(!name %in% list.files('lake_data/NLA2007_cntr'))
 
 for(i in c(1:nrow(files))){
-  path <- paste0('lake_data/EcoReg2000/',files$name[i])
+  path <- paste0('lake_data/NLA2007_cntr/',files$name[i])
   drive_download(as_id(files$id[i]), path, overwrite = T)
 }
 

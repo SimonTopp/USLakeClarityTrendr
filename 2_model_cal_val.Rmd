@@ -19,7 +19,6 @@ library(maps)
 library(magrittr)
 library(mlbench)
 library(caret)
-library(randomForest)
 library(doParallel)
 library(furrr)
 library(lubridate)
@@ -35,12 +34,32 @@ library(ggpmisc)
 #Attempt at FFS Using xgboost and spatial cross validation.
 
 ```{r}
-
 ## Do some final munging/feature engineering
-log = F
-iteration = 'FFS_DistNorm_noLn_Secchi'
-region <- st_read('in/NLA/NLA_Ecoregions/EcoRegsMerged.shp')
-source('0_ModellingFunctions.R')
+# srMunged <- read_feather('out/srMunged.feather') %>%
+#   filter(parameter == 'secchi',
+#          value <= 10,
+#          !is.na(CatAreaSqKm)) %>% #100 obs that didn't match up with LakeCat
+#   mutate(COMID = as.character(COMID),
+#          pctForest2006 = PctDecid2006Cat + PctConif2006Cat + PctMxFst2006Cat,
+#          pctUrban2006 = PctUrbMd2006Cat + PctUrbHi2006Cat,
+#          pctWetland2006 = PctWdWet2006Cat + PctHbWet2006Cat,
+#          areasqkm = round(areasqkm, 1),
+#          meandused = round(meandused, 1),
+#          inStreamCat = as.numeric(inStreamCat),
+#          #Correct the reflectance values based on distribution comparisons (see line 358 in 1_nhd_join_and_munge.Rmd)
+#          blue = ifelse(sat == '5', blue - .84, ifelse(sat == '8', blue + 76.3, blue)),
+#          green = ifelse(sat == '5', green - 29.2, ifelse(sat == '8', green + 46.9, green)),
+#          nir = ifelse(sat == '5', nir - 34.3, ifelse(sat == '8', nir + 127, nir)),
+#          red = ifelse(sat == '5', red - 26.1, ifelse(sat == '8', red + 51.5, red)),
+#          NR = nir/red,
+#          BG = blue/green,
+#          dWL = fui.hue(red, green, blue)) %>%
+#   filter_at(vars(nir, red, blue, green), all_vars(.>0 & .<2000)) %>%
+#   rowwise() %>%
+#   mutate(saturation = rgb2hsv(r=red, g=green, b=blue, maxColorValue = 2000)[2],
+#          brightness = rgb2hsv(r=red,g= green, b= blue, maxColorValue = 2000)[3]) %>%
+#   ungroup()
+
 
 srMunged <- read_feather('out/srMunged.feather') %>%
   filter(parameter == 'secchi',
@@ -53,19 +72,28 @@ srMunged <- read_feather('out/srMunged.feather') %>%
          areasqkm = round(areasqkm, 1),
          meandused = round(meandused, 1),
          inStreamCat = as.numeric(inStreamCat),
-         #Correct the reflectance values based on distribution comparisons (see line 358 in 1_nhd_join_and_munge.Rmd)
-         nir = ifelse(sat == '5', nir - 58, ifelse(sat == '8', nir + 83, nir)),
-         red = ifelse(sat == '5', red - 38, ifelse(sat == '8', red + 33, red)),
-         blue = ifelse(sat == '5', blue - 9, ifelse(sat == '8', blue + 45, blue)),
-         green = ifelse(sat == '5', green - 36, ifelse(sat == '8', green + 29, green)),
-         NR = nir/red,
+         sat = factor(sat, levels = c(5,7,8), labels = c('l5', 'l7', 'l8'))) 
+  
+refCorrect <- srMunged %>% select(UniqueID, blue, green, red, nir, sat) %>%
+  gather(blue:nir, key = 'band' , value = 'value') %>%
+  spread(sat, value) %>%
+  group_by(band) %>%
+  nest() %>%
+  left_join(funcs.8) %>% #From 1_nhd_join_and_munge
+  left_join(funcs.5) %>%
+  mutate(pred8 = map2(lm8, data, predict),
+         pred5 = map2(lm5, data, predict)) %>%
+  select(-c(lm8,lm5)) %>%
+  unnest(data, pred8, pred5) %>%
+  select(-c(l8,l5)) %>%
+  rename(l8 = pred8, l5 = pred5) %>% gather(l5,l7,l8, key = 'sat', value = 'value') %>%
+  spread(band, value) %>%
+  na.omit()
+  
+srMunged <- srMunged %>% select(-c(blue, green, red, nir, sat)) %>% left_join(refCorrect) %>%
+  mutate(NR = nir/red,
          BG = blue/green,
-         dWL = fui.hue(red, green, blue)) %>%
-  filter_at(vars(nir, red, blue, green), all_vars(.>0 & .<2000)) %>%
-  rowwise() %>%
-  mutate(saturation = rgb2hsv(r=red, g=green, b=blue, maxColorValue = 2000)[2],
-         brightness = rgb2hsv(r=red,g= green, b= blue, maxColorValue = 2000)[3]) %>%
-  ungroup()
+         dWL = fui.hue(red, green, blue))
 
 srMunged[srMunged == -9998] = NA ##Standardize missing values
 ##See if removing the ~2k obs with missing depth helps, it doesn't
@@ -142,7 +170,7 @@ ffsResults %>%
 ### XGBoost with Default Hyperparameters
 
 ```{r baseline model, message=FALSE}
-# ffsVariables <- read_feather('out/ffsResultsFull.feather')
+ffsResults <- read_feather('out/ffsResultsFull.feather')
 features <- ffsResults[ffsResults$RMSE == min(ffsResults$RMSE),] %>%
   select(-c(nvar, RMSE, SE)) %>%
   paste(.) %>% .[.!= 'NA']
@@ -373,7 +401,7 @@ xgb_tune4$bestTune
 
 tune_grid5 <- expand.grid(
   nrounds = seq(from = 100, to = 1000, by = 50),
-  eta = c(0.03, 0.05, 0.1, .15), #c(0.01, 0.015, 0.025, 0.05, 0.1),
+  eta = c(0.05, 0.1, .15), #c(0.01, 0.015, 0.025, 0.05, 0.1),
   max_depth = xgb_tune2$bestTune$max_depth,
   gamma = xgb_tune4$bestTune$gamma,
   colsample_bytree = xgb_tune3$bestTune$colsample_bytree,
@@ -614,8 +642,8 @@ ggplot(output.full, aes(x = Actual, y = Predicted)) +
   stat_poly_eq(aes(label =  paste(stat(adj.rr.label))),
                formula = y~x, parse = TRUE, 
                label.y = Inf, vjust = 1.3) +
-  scale_x_continuous(trans = 'log10', labels = scales::comma) +
-  scale_y_continuous(trans = 'log10', labels = scales::comma) +
+  #scale_x_continuous(trans = 'log10', labels = scales::comma) +
+  #scale_y_continuous(trans = 'log10', labels = scales::comma) +
   #coord_equal(ratio = 1) +
   facet_wrap(~region, scales = 'free', shrink = T) +
   labs(title = 'Regional Evaluation Performance') + theme_bw()
@@ -718,5 +746,18 @@ g <- grid.arrange(p1,p2, ncol = 2, widths = c(1,1.7), left = 'Mean Clarity (m)',
 
 ggsave('figures/CoinVFullObs.png', plot = g, width = 5.5, height = 9, units = 'in')
 
+
+##Fig for seminar pres
+fieldmatch.full %>% #filter(Measure == 'In.Situ') %>%
+  ggplot(., aes(x = year, y = mean, color = Measure)) + 
+  geom_line() + 
+  scale_color_viridis_d(end = .6) +
+  facet_wrap(~region, scales = 'free_y', ncol = 2) +
+  labs(title = 'Full Field and Satellite Observations') +
+  theme_bw() +
+  theme(legend.position = c(.75,.1),
+        axis.title = element_blank())
+
+ggsave('figures/Full_TS_field.png', width = 7, height = 6, units = 'in')
 ```
 

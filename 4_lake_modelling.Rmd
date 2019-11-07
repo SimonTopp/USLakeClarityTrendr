@@ -34,40 +34,9 @@ library(trend)
 ```
 
 
-
-```{r}
-# Bring in all the necessary stoof
-iteration = 'FFS_DistNorm_noLn_Secchi'
-lakeSamp = 'EcoReg2000'
-log = F
-region = st_read('in/NLA/NLA_Ecoregions/EcoRegsMerged.shp')
-load(paste0('models/',iteration,'.Rdata'))
-source('0_ModellingFunctions.R')
-
-
-## Read in lakes sent up to EE
-if(lakeSamp == 'NLA'){
-  lakes.up <- read_feather('out/lakesNLA2012.feather')
-  lakesDown <- list.files('lake_data/NLA2012', full.names = T)
-}else if(lakeSamp == 'EcoReg2000'){  
-  lakes.up <- read_feather('out/lakesEcoReg2000.feather')
-  lakesDown <- list.files('lake_data/EcoReg2000', full.names = T)
-}
-
-#lakesDown <- paste0(getwd(), '/lake_data_HUC2/', files$name)
-
-## Extract vector of empty files' names
-empties <- lakesDown[file.info(lakesDown)[["size"]]==1]
-lakesDown <- lakesDown[!lakesDown %in% empties]
-```
-
 ## Connect all of the lake info to LakeCat to get model inputs
 
 ```{r, eval = F}
-#filesUp <- paste0('lake_data/EcoReg500',lakes.up$COMID,'.csv')
-
-#lakesDown <- lakesDown[lakesDown %in% filesUp]
-
 # Load in lakeCat data
 lc.files <- list.files('in/lakeCat/unzip', full.names = T)
 
@@ -114,29 +83,14 @@ lake.join <- lake.join %>%
 
 lake.join[lake.join == -9998] = NA
 
-if(lakeSamp != 'NLA'){
+if(lakeSamp == 'EcoReg2000'){
   write_feather(lake.join, 'out/EcoReg2000LakesFull.feather')
 }else if(lakeSamp == 'NLA'){
   write_feather(lake.join, 'out/NLA2012LakesFull.feather')
+}else if(lakeSamp == 'Over10'){
+  write_feather(lake.join, 'out/Over10LakesFull.feather')
 }
 
-## Make look up table for AOD values
-aodLUT <- function(path){
-    df <- read.csv(path, stringsAsFactors = F) %>%
-      mutate(COMID = as.character(COMID),
-             year = year(date)) %>%
-      filter(!is.na(blue)) %>%
-      inner_join(lake.join %>% mutate(COMID = as.character(COMID)), by = c('COMID')) %>%
-      distinct(system.index, date, .keep_all = T)
-      
-      lut <- df %>%
-        select(COMID, date, lat = pour_lat, long = pour_long) %>%
-        rowwise() %>%
-        mutate(AOD = ifelse(ymd_hms(date) > ymd('2019/07/30'),
-                            NA, pullMerra(date = date, lat = lat, long = long))) %>%
-        ungroup()
-  return(lut)
-}
 
 plan(multiprocess)
 lut <- lakesDown %>% future_map_dfr(aodLUT, .progress = T)
@@ -154,17 +108,6 @@ ffsVariables <- read_feather('out/ffsResultsFull.feather')
 features <- ffsVariables[ffsVariables$RMSE == min(ffsVariables$RMSE),] %>%
   select(-c(nvar, RMSE, SE)) %>%
   paste(.) %>% .[.!= 'NA']
-
-if(lakeSamp == 'NLA'){
-  lake.join <- read_feather('out/NLA2012LakesFull.feather')
-  ids <-list.files('lake_data/NLA2012') %>% strsplit(split = '.csv', fixed = T) %>% unlist()
-  lakesDown <- list.files('lake_data/NLA2012', full.names = T)
-  }else if(lakeSamp == 'EcoReg2000'){
-    lake.join <- read_feather('out/EcoReg2000LakesFull.feather')
-    ids <- list.files('lake_data/EcoReg2000') %>%strsplit(split = '.csv', fixed = T) %>% unlist()
-    lakesDown <- list.files('lake_data/EcoReg2000', full.names = T)
-  }
-
 
 plan(multiprocess(workers = availableCores()-4))
 

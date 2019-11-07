@@ -5,24 +5,73 @@ EvalPreds <- function(id, paths, lakesUp, log, model, features, lakeSamp){
   # Really buggy but no serious ones, set it up with tryCatch so it'll return an empty data frame if it fails
   predicted <- tibble(system.index = NA, COMID = id, date = NA, year = NA, month = NA, value = NA, lakeSamp = lakeSamp)
   try({
+    # df <- read.csv(grep(paste0('/',id,'.csv'),paths, value = T), stringsAsFactors = F) %>%
+    # mutate(COMID = as.character(COMID),
+    #        sat = factor(sat, levels = c(5,7,8), labels = c('l5','l7', 'l8'))) %>%
+    #   filter(!is.na(blue),
+    #          dswe == 1,
+    #          dswe_sd < .4,
+    #          hillshadow == 1,
+    #          cScore == 0,
+    #          Cloud_Cover < 50,
+    #          pixelCount > 5) %>%
+    #   filter_at(vars(red, blue, green, nir, swir1, swir2), all_vars(.>0 & .<2000)) %>%
+    #   gather(blue, green, red, nir, key = 'band' , value = 'value') %>%
+    #   spread(sat, value) %>%
+    #   group_by(band) %>%
+    #   nest() %>%
+    #   left_join(funcs.5) %>%
+    #   mutate(pred5 = map2(lm5, data, predict)) %>%
+    #   select(-lm5) %>%
+    #   unnest(data, pred5) %>%
+    #   select(-l5) %>%
+    #   rename(l5 = pred5) %>% gather(l5,l7, key = 'sat', value = 'value') %>%
+    #   spread(band, value) %>%
+    #   filter(!is.na(blue)) %>%
+    #   inner_join(lakesUp %>% rename(date.field = date), by = 'COMID') %>%
+    #   distinct(.keep_all = T) %>%
+    #   mutate(NR = nir/red,
+    #          BG = blue/green,
+    #          dWL = fui.hue(red, green, blue),
+    #          #date = ymd_hms(date),
+    #          year = year(date),
+    #          month = as.numeric(month(date)),
+    #          pctForest2006 = PctDecid2006Cat + PctConif2006Cat + PctMxFst2006Cat,
+    #          pctUrban2006 = PctUrbMd2006Cat + PctUrbHi2006Cat,
+    #          pctWetland2006 = PctWdWet2006Cat + PctHbWet2006Cat,
+    #          areasqkm = round(areasqkm, 1),
+    #          meandused = round(meandused, 1)) %>%
+    #   filter_at(vars(blue,green,red,nir,swir1,swir2),all_vars(.>0 & .< 2000))
+
+
     df <- read.csv(grep(paste0('/',id,'.csv'),paths, value = T), stringsAsFactors = F) %>%
       mutate(COMID = as.character(COMID),
-             year = year(date)) %>%
+             year = year(date),
+             UniqueID = row_number(),
+             sat = factor(sat, levels = c(5,7,8), labels = c('l5','l7','l8'))) %>%
+      filter(!is.na(blue),
+             dswe == 1,
+             dswe_sd < .4,
+             cScore == 0) %>%
+      gather(blue, green, red, nir, key = 'band' , value = 'value') %>%
+      spread(sat, value) %>%
+      group_by(band) %>%
+      nest() %>%
+      left_join(funcs.8) %>% #From 1_nhd_join_and_munge
+      left_join(funcs.5) %>%
+      mutate(pred8 = map2(lm8, data, predict),
+             pred5 = map2(lm5, data, predict)) %>%
+      select(-c(lm8,lm5)) %>%
+      unnest(data, pred8, pred5) %>%
+      select(-c(l8,l5)) %>%
+      rename(l8 = pred8, l5 = pred5) %>% gather(l5,l7,l8, key = 'sat', value = 'value') %>%
+      spread(band, value) %>%
       filter(!is.na(blue)) %>%
       inner_join(lakesUp %>% mutate(COMID = as.character(COMID))) %>%
-      distinct(.keep_all = T)
-    
-    pix.cut <- max(df$pixelCount)/3  ##Filter any observation that doesn't capture at least 1/3 of the lake.
-
-    df <- df %>%
-      mutate(nir = ifelse(sat == '5', nir - 58, ifelse(sat == '8', nir + 83, nir)),
-             red = ifelse(sat == '5', red - 38, ifelse(sat == '8', red + 33, red)),
-             blue = ifelse(sat == '5', blue - 9, ifelse(sat == '8', blue + 45, blue)),
-             green = ifelse(sat == '5', green - 36, ifelse(sat == '8', green + 29, green)),
-             NR = nir/red,
+      distinct(.keep_all = T) %>%
+      mutate(NR = nir/red,
              BG = blue/green,
              dWL = fui.hue(red, green, blue),
-             sat = factor(sat, levels = c('5','7','8')),
              #date = ymd_hms(date),
              month = as.numeric(month(date)),
              pctForest2006 = PctDecid2006Cat + PctConif2006Cat + PctMxFst2006Cat,
@@ -30,8 +79,29 @@ EvalPreds <- function(id, paths, lakesUp, log, model, features, lakeSamp){
              pctWetland2006 = PctWdWet2006Cat + PctHbWet2006Cat,
              areasqkm = round(areasqkm, 1),
              meandused = round(meandused, 1)) %>%
-      filter(pixelCount > pix.cut) %>%
+      filter(pixelCount > 5) %>%
       filter_at(vars(blue,green,red,nir,swir1,swir2),all_vars(.>0 & .< 2000))
+
+    #pix.cut <- max(df$pixelCount)/2  ##Filter any observation that doesn't capture at least 1/3 of the lake.
+    # df <- df %>%
+    #   mutate(blue = ifelse(sat == '5', blue - .84, ifelse(sat == '8', blue + 76.3, blue)),
+    #          green = ifelse(sat == '5', green - 29.2, ifelse(sat == '8', green + 46.9, green)),
+    #          nir = ifelse(sat == '5', nir - 34.3, ifelse(sat == '8', nir + 127, nir)),
+    #          red = ifelse(sat == '5', red - 26.1, ifelse(sat == '8', red + 51.5, red)),
+    #          NR = nir/red,
+    #          BG = blue/green,
+    #          dWL = fui.hue(red, green, blue),
+    #          sat = factor(sat, levels = c('5','7','8')),
+    #          #date = ymd_hms(date),
+    #          month = as.numeric(month(date)),
+    #          pctForest2006 = PctDecid2006Cat + PctConif2006Cat + PctMxFst2006Cat,
+    #          pctUrban2006 = PctUrbMd2006Cat + PctUrbHi2006Cat,
+    #          pctWetland2006 = PctWdWet2006Cat + PctHbWet2006Cat,
+    #          areasqkm = round(areasqkm, 1),
+    #          meandused = round(meandused, 1)) %>%
+    #   filter(pixelCount > pix.cut) %>%
+    #   filter_at(vars(blue,green,red,nir,swir1,swir2),all_vars(.>0 & .< 2000))
+
 
     if('AOD' %in% features){
       if(lakeSamp == 'NLA'){
@@ -90,69 +160,8 @@ spaceTimeFigs <- function(con = 'Secchi', abs = T){
 }
 
 
-## Write a function to sample lakes and run the stl decomp.
-bootstrap.stl <- function(iteration, full.preds, ice.months, sample.size = 100){
-  
-  ## Create dummy variable
-  dummy <- expand.grid(year = seq(1985,2018), 
-                       month = c(1:12), 
-                       region = unique(region$region),
-                       parameter = c('tss', 'chl_a', 'secchi')) %>% 
-    mutate(iceID = paste0(month,region)) %>%
-    right_join(ice.months %>% 
-                 select(month,region, num.vis) %>% 
-                 mutate(iceID = paste0(month,region)))
-  
-  ## Sample lakes in each HUC
-  if(is.null(sample.size)){
-    samp <- full.preds %>%
-      distinct(COMID, .keep_all = T) %>%
-      group_by(region) %>%
-      nest() %>%
-      mutate(n = purrr::map(data, nrow),
-             samp = purrr::map2(data, n, sample_n, replace = T)) %>%
-      unnest(samp)
-  }else{samp <- full.preds %>%
-    distinct(COMID, .keep_all = T) %>%
-    group_by(region) %>%
-    sample_n(sample.size, replace = T) %>%
-    select(COMID, region)}
-  
-  ## Calculate median based on those lakes  
-  yearly.median <- full.preds %>%
-    na.omit() %>%
-    filter(COMID %in% samp$COMID,
-           year < 2019) %>%
-    group_by(COMID, year, month, region, parameter) %>%
-    dplyr::summarize(value = median(value, na.rm = T)) %>%
-    group_by(year, month, region, parameter) %>%
-    dplyr::summarize(median = median(value, na.rm = T),
-                     sd = sd(value, na.rm =T)) %>%
-    right_join(dummy)%>%
-    arrange(parameter, region, year, month)%>%
-    filter(parameter == 'secchi') %>% # Remove if adding more params than secchi
-    mutate(date = as.POSIXct(paste0(year,'/',month,'/',01)))
-  
-  ## Run stl and save results in a data frame
-  
-  stl <- yearly.median %>%
-    group_by(region, parameter) %>%
-    nest() %>%
-    mutate(stl = future_map(data, ~stlplus(x = .$median, t = .$date, 
-                                           n.p = .$num.vis[1], s.window = 25,#OG 25
-                                           sub.labels = c(1:.$num.vis[1]))),
-           date = purrr::map(stl, 'time'),
-           stl = purrr::map(stl, 'data')) %>%
-    dplyr::select(-data) %>%
-    unnest() %>%
-    mutate(year = year(date),
-           month = month(date)) %>%
-    left_join(region %>% st_set_geometry(NULL)) %>%
-    mutate(iteration = iteration)
-  
-  return(stl)
-} 
 
+## Function for pulling Mera AOD values
 pullMerra <- function(path = 'in/MERRA2_data2', date, lat, long){
   files = list.files(path, full.names = T)
   yearMonth <- ifelse(month(date) < 10, paste0(year(date),'0', month(date)),paste0(year(date), month(date)))
@@ -202,8 +211,6 @@ fui.hue <- function(R, G, B) {
 }
 
 
-
-
 ## function for sampling either full stack or number if number is less than full stack.
 sample_vals <- function (tbl, size, replace = FALSE, weight = NULL){
   ## assert_that(is.numeric(size), length(size) == 1, size >= 0)
@@ -238,4 +245,23 @@ boot.summary<- function(boots){
                     bias = colMeans(boots$t) - boots$t0,
                     year = c(1984:2018))
   return(summary)
+}
+
+
+## Make look up table for AOD values
+aodLUT <- function(path){
+  df <- read.csv(path, stringsAsFactors = F) %>%
+    mutate(COMID = as.character(COMID),
+           year = year(date)) %>%
+    filter(!is.na(blue)) %>%
+    inner_join(lake.join %>% mutate(COMID = as.character(COMID)), by = c('COMID')) %>%
+    distinct(system.index, date, .keep_all = T)
+  
+  lut <- df %>%
+    select(COMID, date, lat = pour_lat, long = pour_long) %>%
+    rowwise() %>%
+    mutate(AOD = ifelse(ymd_hms(date) > ymd('2019/07/30'),
+                        NA, pullMerra(date = date, lat = lat, long = long))) %>%
+    ungroup()
+  return(lut)
 }

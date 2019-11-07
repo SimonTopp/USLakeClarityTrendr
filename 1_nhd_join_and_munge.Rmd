@@ -43,11 +43,11 @@ sr <- read.csv('../Aquasat/3_rswqjoin/data/out/sr_wq_rs_join.csv', stringsAsFact
 #                           ifelse(US_L3CODE %in% c(58, 62, 82, 59, 60, 61, 83), "Northern Appalachians",
 #                                  ifelse(US_L3CODE %in% c(45, 64, 71, 36, 37, 38, 39, 66, 67, 68, 69, 70), 'Southern Appalachians',
 #                                         ifelse(US_L3CODE %in% c(49,50, 51,52,56), 'Upper Midwest',
-#                                                ifelse(US_L3CODE %in% c(53, 54, 55, 57, 72, 40, 46, 47, 48, 28), 'Temperate Planes', ifelse(US_L3CODE %in% c(42,43), 'Northern Plains', ifelse(US_L3CODE %in% c(44, 25, 26, 27, 29, 30, 32, 31), 'Southern Plains', ifelse(US_L3CODE %in% c(10, 12, 13, 18, 20, 22, 80, 14, 81, 24, 6, 7, 79, 85), 'Xeric West', ifelse(US_L3CODE %in% c(11,15,16,17,19,21,4,41,11,15,16,17,29,21,4,41,11,5,77,78,9,1,2,3,23,8), 'Western Mountains', NA)))))))))) %>%
+#                                                ifelse(US_L3CODE %in% c(53, 54, 55, 57, 72, 40, 46, 47, 48, 28), 'Temperate Plains', ifelse(US_L3CODE %in% c(42,43), 'Northern Plains', ifelse(US_L3CODE %in% c(44, 25, 26, 27, 29, 30, 32, 31), 'Southern Plains', ifelse(US_L3CODE %in% c(10, 12, 13, 18, 20, 22, 80, 14, 81, 24, 6, 7, 79, 85), 'Xeric West', ifelse(US_L3CODE %in% c(11,15,16,17,19,21,4,41,11,15,16,17,29,21,4,41,11,5,77,78,9,1,2,3,23,8), 'Western Mountains', NA)))))))))) %>%
 #   group_by(region) %>%
 #   summarize(inputs = glue::collapse(unique(US_L3CODE), sep = ', '))
 # 
-# st_write(ecoRegs, 'in/NLA/NLA_Ecoregions/EcoRegsMerged.shp')
+#st_write(ecoRegs, 'in/NLA/NLA_Ecoregions/EcoRegsMerged.shp')
 
 region <- st_read('in/NLA/NLA_Ecoregions/EcoRegsMerged.shp')
 
@@ -58,21 +58,21 @@ sr.sf <- st_as_sf(sr,coords=c('long','lat'), crs=4326) %>%
 
 ## Download lakeCat data
 ```{r, eval = F}
-library(RCurl)
-
-url = "ftp://newftp.epa.gov/EPADataCommons/ORD/NHDPlusLandscapeAttributes/LakeCat/FinalTables/"
-filenames = getURL(url, ftp.use.epsv = FALSE, dirlistonly = TRUE) %>%
-  strsplit(., "\n") %>%
-  unlist() %>%
-  grep(.,pattern = '.zip', value = T)
-
-for (file in filenames) {
-  download.file(paste0(url, file), paste0('lakeCat/', file))
-}
-
-for (file in filenames){
-  unzip(zipfile = paste0('lakeCat/',file), exdir = 'lakeCat/')
-}
+# library(RCurl)
+# 
+# url = "ftp://newftp.epa.gov/EPADataCommons/ORD/NHDPlusLandscapeAttributes/LakeCat/FinalTables/"
+# filenames = getURL(url, ftp.use.epsv = FALSE, dirlistonly = TRUE) %>%
+#   strsplit(., "\n") %>%
+#   unlist() %>%
+#   grep(.,pattern = '.zip', value = T)
+# 
+# for (file in filenames) {
+#   download.file(paste0(url, file), paste0('lakeCat/', file))
+# }
+# 
+# for (file in filenames){
+#   unzip(zipfile = paste0('lakeCat/',file), exdir = 'lakeCat/')
+# }
 ```
 
 ## Join the data to NHD to extract additional landscape and lake specific variables
@@ -184,17 +184,17 @@ lakeCat.munged <- lakeCat.full %>%
   filter(!is.na(CatAreaSqKm)) %>%  ## ~125 sites from SR weren't within 90 meters of an NHD waterbody.
   select(-c(grep(names.in, pattern = '*Ws', value = T), 
             grep(names.in, pattern = '2011Cat', value = T),
-            ## 2011 values aren't representative of the study period
+            ### 2011 values aren't representative of the study period
             grep(names.in, pattern = 'PctFire', value = T), 
-            ## While potentially important, the forest metrics lack 
-            grep(names.in, pattern = 'PctFrstLoss', value = T), 
-            ##the temporal resolution we need.
+            grep(names.in, pattern = 'PctFrstLoss', value = T),
+            ### While potentially important, the forest metrics lack 
+            ### the temporal resolution we need.
             grep(names.in, pattern = 'NABD', value = T), 
-            ##Dam info acts as identifiers and are redundant with lake_type/area
+            ### Dam info acts as identifiers and are redundant with lake_type/area
             grep(names.in, pattern = 'Dam', value = T), 
-            ##Dam info acts as identifiers and are redundant with lake_type/area
+            ### Dam info acts as identifiers and are redundant with lake_type/area
             'Precip08Cat', 'Precip09Cat', 'Tmean08Cat', 'Tmean09Cat')) %>%  
-            #Use long term averages not these
+            ### Use long term averages not these
   mutate(inStreamCat = factor(inStreamCat))
 
 ## Look at variables and round everything to a reasonable number of digits to avoid ID like variables.
@@ -266,10 +266,8 @@ ggplot(check) + geom_bar(aes(x = source))
 
 ## Workflow for creating munged parameter dataframe from fully joined reflectance, NHD, and hydrolakes data.
 ```{r}
-source('0_ModellingFunctions.R')
-
 # Function for munging full data based on reasonable values.  
-munger <- function(df, param, dswe = 1, dswe.sd = 0, minPix = 8, maxClouds = 50, maxTimeDiff = 129600, maxRef = 2000, minRef = 1, h.shadow = 1, h.shadow_sd = 0){
+munger <- function(df, param, dswe.lim = 1, dswe.sd.lim = 0, minPix = 8, maxClouds = 50, maxTimeDiff = 129600, maxRef = 2000, minRef = 1, h.shadow = 1, h.shadow_sd = 0){
   
   minValue = 0.001
   maxValue = quantile(df$value, .99)
@@ -293,8 +291,8 @@ munger <- function(df, param, dswe = 1, dswe.sd = 0, minPix = 8, maxClouds = 50,
          hillshadow_sd <= h.shadow_sd, 
          clouds < maxClouds,
          abs(timediff) < maxTimeDiff,
-         dswe == dswe, ##Only high confidence water
-         dswe_sd <= dswe.sd,
+         dswe == dswe.lim, ##Only high confidence water
+         dswe_sd <= dswe.sd.lim,
          value > minValue,
          value < maxValue) %>%
     filter_at(vars(blue,green,red,nir,swir1,swir2),all_vars(.>minRef & .<maxRef)) %>%
@@ -312,7 +310,7 @@ files <- list.files('in/MERRA2_data2', full.names = T)
 munged <- sr %>%
   group_by(parameter) %>%
   nest() %>%
-  mutate(munge = purrr::map2(.x = data, .y = parameter, ~munger(.x, param = .y, dswe.sd = .4))) %>%
+  mutate(munge = purrr::map2(.x = data, .y = parameter, ~munger(.x, param = .y, dswe.sd = .3))) %>%
   select(-data) %>%
   unnest(munge) %>%
   left_join(site.data.full) %>%
@@ -321,15 +319,17 @@ munged <- sr %>%
   mutate(Reservoir = factor(ifelse(FTYPE == "Reservoir", 1, 0))) %>%
   distinct(COMID, value, parameter, landsat_id, date, lat, long, .keep_all = T) %>% #remove duplicate values (see workflow at line ~200)
 ## Finally, tag on Aerosol Optical Depth from the MERRA-2 Reanalysis
-  rowwise() %>%
-  #mutate(AOD = pullMerra(date = date, lat = lat, long =long)) %>%
-  ungroup() %>%
+  # rowwise() %>%
+  # mutate(AOD = pullMerra(date = date, lat = lat, long =long)) %>% ##This awhile
+  # ungroup() %>%
   select(-.geo)
   ##Join to NLA EcoRegions
+
+
 munged <- munged %>% 
   #select(-geometry) %>%
-  rename_at(vars(FDATE:LakeArea), tolower) ##Because of previous framework.
-#write_feather(munged, 'out/srMunged.feather')
+  rename_at(vars(FDATE:LakeArea), tolower) #Because of previous framework.
+write_feather(munged, 'out/srMunged.feather')
 #munged <- read_feather('out/srMunged.feather')
 ```
 
@@ -386,8 +386,8 @@ lsCompsPre <- read_feather('out/srMunged.feather') %>%
          !is.na(CatAreaSqKm)) %>%
   mutate(NR = nir/red,
          BG = blue/green,
-         dWL = fui.hue(red, green, blue)) %>%
-  select()
+         dWL = fui.hue(red, green, blue),
+         sat = factor(sat, levels = c(5,7,8), labels = c('l5','l7','l8'))) 
 
 
 ##First, compare landsat 5 to landsat 7.  We'll limit the comparison to coincident dates when both satellites were in the air.  Theoretically these distributions should be the same.
@@ -396,17 +396,17 @@ lsCompsPre %>% filter(year > 1999, year < 2012) %>% gather(red, blue, green, nir
 
 
 ## Calculate differences between 5 and 7
-lsCompsPre %>% filter(year > 1999, year < 2012) %>% gather(red, blue, green, nir, NR, BG, dWL, key = 'Band', value = 'value') %>%
+lsCompsPre %>% filter(year > 1999, year < 2012) %>% gather(red, blue, green, nir, key = 'Band', value = 'value') %>%
   group_by(sat, Band) %>%
-  summarise(med = median(value)) %>%
+  summarise(med = mean(value)) %>%
   spread(sat, med) %>%
   mutate(satDiff = `7` - `5`)
 
 ## Now look at differences between 7 and 8.  Similarly, we'll limit this to only coincident time periods
 lsCompsPre %>% filter(year > 2012) %>% gather(red, blue, green, nir, NR, BG, dWL, key = 'Band', value = 'value') %>%
-  ggplot(., aes(x = value, color = sat)) + geom_density() + facet_wrap(~Band, scales = 'free') 
+  ggplot(., aes(x = value, color = sat)) + geom_density() + facet_wrap(~Band, scales = 'free')
 
-lsCompsPre %>% filter(year > 2012) %>% gather(red, blue, green, nir, NR, BG, dWL, key = 'Band', value = 'value') %>%
+lsCompsPre %>% filter(year > 2012) %>% gather(red, blue, green, nir, key = 'Band', value = 'value') %>%
   group_by(sat, Band) %>%
   summarise(med = mean(value)) %>%
   spread(sat, med) %>%
@@ -418,12 +418,12 @@ lsCompsPost <- read_feather('out/srMunged.feather') %>%
          value <= 10,
          !is.na(CatAreaSqKm)) %>%
   mutate(blue = ifelse(sat == '5', blue - 9, ifelse(sat == '8', blue + 45, blue)),
-         dWL = fui.hue(red, green, blue),
          green = ifelse(sat == '5', green - 36, ifelse(sat == '8', green + 29, green)),
          nir = ifelse(sat == '5', nir - 58, ifelse(sat == '8', nir + 83, nir)),
          red = ifelse(sat == '5', red - 38, ifelse(sat == '8', red + 33, red)),
          NR = nir/red,
-         BG = blue/green)
+         BG = blue/green,
+         dWL = fui.hue(red, green, blue))
 
 ## Before and after figures
 #5 and 7
@@ -452,7 +452,7 @@ lakes.join <- read_feather('out/EcoReg2000LakesFull.feather')
 size.check <- lake.join %>% mutate(lakearea = as.numeric(as.character(lakearea))/1000000) %>% filter(lakearea > 0.01)
 
 ###### Do the same thing but with the reflectance values from the large lake pull
-files <- list.files('lake_data/NLA2012/', full.names = T)
+files <- list.files('lake_data/NLA2012_cntr/', full.names = T)
 refCompPre <- purrr::map_dfr(files, read.csv, stringsAsFactors = F) %>%
   filter(!is.na(blue),
          dswe == 1,
@@ -465,30 +465,44 @@ refCompPre <- purrr::map_dfr(files, read.csv, stringsAsFactors = F) %>%
   mutate(dWL = fui.hue(red, green, blue),
          date = ymd_hms(date),
          year = year(date),
-         sat = factor(sat),
-         source = 'random') %>%
+         sat =  sat = factor(sat, levels = c(5,7,8), labels = c('l5','l7','l8')),
+         source = 'NLA') %>%
   select(year, blue, red, green, nir, dWL, sat, source, COMID)
 
 ## Make sure we have at least 10 years of data from each included waterbody, this removes small, ephemeral, noisy bodies
 ## that won't be included in the final analysis anyways.
-counts <- refCompPre %>% filter(source == 'random') %>% group_by(COMID, year) %>% summarise(count = n()) %>% group_by(COMID) %>% summarise(count = n()) %>%
-  filter(count > 10)
+counts <- refCompPre %>% filter(source == 'NLA') %>% group_by(COMID, year) %>% summarise(count = n()) %>% group_by(COMID) %>% summarise(count = n()) %>%
+  filter(count > 15)
 
-refCompPre <- refCompPre %>% filter(COMID %in% counts$COMID) %>%
-  bind_rows(lsCompsPre %>% mutate(source = 'AquaSat') %>% select(year, blue, red, green, nir, dWL, sat, source, COMID))
+refCompPre <- refCompPre %>% #filter(COMID %in% counts$COMID) %>%
+  bind_rows(lsCompsPre %>% mutate(source = 'AquaSat') %>% select(year, blue, red, green, nir, dWL, sat, source, COMID)) %>%
+  mutate(correction = 'Pre.Correction', uniqueID = row_number())
+
+centers <- refCompPre %>%
+  filter(year > 2012) %>%
+  gather(red, blue, green, nir, dWL, key = 'Band', value = 'value') %>%
+  group_by(source, sat, Band) %>%
+  summarise(center = mean(value))
+
+centers %>%
+  spread(sat, center) %>%
+  mutate(satDiff = `7` - `8`) %>%
+  select(-c(`7`,`8`)) %>%
+  spread(source, satDiff) %>%
+  mutate(sourceDiff = AquaSat - NLA)
 
 refCompPre %>%
   mutate(BG = blue/green, NR = nir/red) %>%
   filter(year > 1999, year < 2012) %>%
   gather(red, blue, green, nir, dWL, key = 'Band', value = 'value') %>%
   ggplot(., aes(x = value, color = sat, linetype = source)) + 
-  geom_freqpoly(stat = 'density') + facet_wrap(~Band, scales = 'free')  +
-  ggtitle("Reflectance differences b/w AquaSat and Random Pull 5/7")
+  geom_freqpoly(stat = 'density') + facet_wrap(~Band, scales = 'free') +
+  ggtitle("Reflectance differences b/w AquaSat and NLA Pull 5/7")
 
 ## Calculate differences between 5 and 7 for Full lakes
-refCompPre %>% filter(year > 1999, year < 2012, source == 'random') %>% gather(red, blue, green, nir, dWL, key = 'Band', value = 'value') %>%
+refCompPre %>% filter(year > 1999, year < 2012, source == 'NLA') %>% gather(red, blue, green, nir, key = 'Band', value = 'value') %>%
   group_by(sat, Band) %>%
-  summarise(med = median(value)) %>%
+  summarise(med = mean(value)) %>%
   spread(sat, med) %>%
   mutate(satDiff = `7` - `5`)
 
@@ -499,65 +513,135 @@ refCompPre%>%
   geom_density() + facet_wrap(~Band, scales = 'free') 
 
 ## Calculate differences between 7 and 8
-refCompPre %>% filter(year > 2012, source == 'random') %>% gather(red, blue, green, nir, dWL, key = 'Band', value = 'value') %>%
+refCompPre %>% filter(year > 2012, source == 'NLA') %>% gather(red, blue, green, nir,key = 'Band', value = 'value') %>%
   group_by(sat, Band) %>%
-  summarise(med = median(value)) %>%
+  summarise(med = mean(value)) %>%
   spread(sat, med) %>%
   mutate(satDiff = `7` - `8`)
 
 
+# refCompPost <- refCompPre %>%
+#   mutate(blue = ifelse(sat == '5', blue - .84, ifelse(sat == '8', blue + 76.3, blue)),
+#          green = ifelse(sat == '5', green - 29.2, ifelse(sat == '8', green + 46.9, green)),
+#          nir = ifelse(sat == '5', nir - 34.3, ifelse(sat == '8', nir + 127, nir)),
+#          red = ifelse(sat == '5', red - 26.1, ifelse(sat == '8', red + 51.5, red)),
+#          NR = nir/red,
+#          BG = blue/green,
+#          dWL = fui.hue(red, green, blue),
+#          correction = 'Post.Correction')
+
+
+
+## Before and after figures
+#5 and 7
+p1 <- refCompPre %>% filter(year > 1999, year < 2012) %>% gather(red, blue, green, nir, key = 'Band', value = 'value') %>% 
+  bind_rows(refCompPost %>% filter(year > 1999, year < 2012) %>% gather(red, blue, green, nir, key = 'Band', value = 'value')) %>% mutate(correction = factor(correction, levels = c('Pre.Correction', 'Post.Correction'))) %>%
+  ggplot(., aes(x = value, color = sat, linetype = source)) + geom_density() + facet_grid(Band~correction, scales = 'free') + scale_color_viridis_d(end = .5) + theme_bw() + theme(legend.position = 'none') + ggtitle('Landsat 5 and 7 SR Distributions')
+
+p2 <- refCompPre %>% filter(year > 1999, year < 2012) %>% mutate(value = dWL, Band = 'dWL') %>% bind_rows(refCompPost %>% filter(year > 1999, year < 2012) %>% mutate(value = dWL, Band = 'dWL')) %>%  mutate(correction = factor(correction, levels = c('Pre.Correction', 'Post.Correction'))) %>% ggplot(., aes(x = value, color = sat, linetype = source)) + geom_density() + facet_grid(Band~correction, scales = 'free') + scale_color_viridis_d(end = .5) + theme_bw() + theme(legend.position = 'none') + ggtitle('Resulting Dominant Wavelength')
+
+p3 <- refCompPre %>% filter(year > 1999, year < 2012) %>% mutate(BG = blue/green, NR = nir/red) %>%
+  gather(NR,BG, key = 'Band', value = 'value') %>% bind_rows(refCompPost %>% filter(year > 1999, year < 2012) %>% mutate(BG = blue/green, NR = nir/red) %>% gather(NR,BG, key = 'Band', value = 'value')) %>%  mutate(correction = factor(correction, levels = c('Pre.Correction', 'Post.Correction'))) %>% ggplot(., aes(x = value, color = sat, linetype = source)) + geom_density() + facet_grid(Band~correction, scales = 'free') + scale_color_viridis_d(end = .5) + theme_bw() + theme(legend.position = 'bottom') + scale_x_continuous(limits = c(0,3)) + ggtitle('Resulting Ratios')
+
+g <- grid.arrange(p1,p2,p3, ncol = 1, heights = c(5,3,4))
+
+ggsave('figures/5_7_CorrectionsComps_NLA_poly.png', g, width = 4, height = 9, units = 'in')
+
+## 7 and 8
+p1 <- refCompPre %>% filter(year > 2012) %>% gather(red, blue, green, nir, key = 'Band', value = 'value') %>% 
+  bind_rows(refCompPost %>% filter(year > 2012) %>% gather(red, blue, green, nir, key = 'Band', value = 'value')) %>% mutate(correction = factor(correction, levels = c('Pre.Correction', 'Post.Correction'))) %>%
+  ggplot(., aes(x = value, color = sat, linetype = source)) + geom_density() + facet_grid(Band~correction, scales = 'free') + scale_color_viridis_d(begin = .3, end = .7) + theme_bw() + theme(legend.position = 'none') + ggtitle('Landsat 7 and 8 SR Distributions')
+
+p2 <- refCompPre %>% filter(year > 2012) %>% mutate(value = dWL, Band = 'dWL') %>% bind_rows(refCompPost %>% filter(year > 2012) %>% mutate(value = dWL, Band = 'dWL')) %>%  mutate(correction = factor(correction, levels = c('Pre.Correction', 'Post.Correction'))) %>% ggplot(., aes(x = value, color = sat, linetype = source)) + geom_density() + facet_grid(Band~correction, scales = 'free') + scale_color_viridis_d(begin = .3, end = .7) + theme_bw() + theme(legend.position = 'none') + ggtitle('Resulting Dominant Wavelength')
+
+p3 <- refCompPre %>% filter(year > 2012) %>% mutate(BG = blue/green, NR = nir/red) %>%
+  gather(NR,BG, key = 'Band', value = 'value') %>% bind_rows(refCompPost %>% filter(year > 2012) %>% mutate(BG = blue/green, NR = nir/red) %>% gather(NR,BG, key = 'Band', value = 'value')) %>%  mutate(correction = factor(correction, levels = c('Pre.Correction', 'Post.Correction'))) %>% ggplot(., aes(x = value, color = sat, linetype = source)) + geom_density() + facet_grid(Band~correction, scales = 'free') + scale_color_viridis_d(begin = .3, end = .7) + theme_bw() + theme(legend.position = 'bottom') + scale_x_continuous(limits = c(0,3)) + ggtitle('Resulting Ratios')
+
+g <- grid.arrange(p1,p2,p3, ncol = 1, heights = c(5,3,4))
+
+
+ggsave('figures/7_8_CorrectionsComps_NLA_poly.png', g, width = 4, height = 9, units = 'in')
+
+```
+
+
+```{r}
+lm8 <- function(band, x){
+  x <- x %>% filter(year > 2012, source == 'NLA')
+  df <- tibble(l7 = quantile(x %>% filter(sat == 'l7') %>% .[,band], 
+                             seq(.01,.99, .01)), 
+               l8 = quantile(x %>% filter(sat == 'l8') %>% .[,band], 
+                             seq(.01,.99, .01)))
+  lm <- lm(l7~poly(l8, 2), data = df)
+  lut <- tibble(quantile = names(lm$fitted.values), value = lm$fitted.values)
+  return(lm)
+}
+
+lm5 <- function(band, x){
+  x <- x %>% filter(year > 1999, year < 2012, source == 'NLA') 
+  df <- tibble(l7 = quantile(x %>% filter(sat == 'l7') %>% .[,band], 
+                             seq(.01,.99, .01)), 
+               l5 = quantile(x %>% filter(sat == 'l5') %>% .[,band], 
+                             seq(.01,.99, .01)))
+  lm <- lm(l7~poly(l5, 2), data = df)
+  return(lm)
+}
+
+
+##Check out the resulting corrections a little
+band = 'green'
+sat = 'l8'
+x <- refCompPre %>% filter(source == 'NLA', year > 2012)
+max.x <- max(x[,band])
+df <- tibble(y = quantile(x %>% filter(sat == 'l7') %>% .[,band], 
+                             seq(.01,.99, .01)), 
+             x = quantile(x %>% filter(sat == 'l8') %>% .[,band], 
+                             seq(.01,.99, .01)))
+lm <- lm(y~poly(x, 2), data = df)
+df <- df %>% bind_cols(corrected = lm$fitted.values) %>%
+  gather(x, corrected, key = 'source', value = x) %>%
+  mutate(source = ifelse(source == 'x', 'original', source))
+
+ggplot(df, aes(x = x, y = y, color = source)) + geom_point() + geom_abline(color = 'red') + scale_y_continuous(sec.axis = sec_axis(~.*(100/1500), name = 'quantile')) + labs(x = 'L8', y = 'l7', title = 'Polynomial Correction Example')
+
+df <- df %>% bind_cols(corrected = funcs.8$lm8[funcs.8$band == band][[1]]$fitted.values) %>%
+  gather(x, corrected, key = 'source', value = x)
+
+
+## Generate functions
+bands <- tibble(band = c('blue', 'green', 'nir', 'red'))
+funcs.8 <- bands %>%
+  mutate(lm8 = purrr::map(band, lm8, x = refCompPre))
+funcs.5 <- bands %>%
+  mutate(lm5 = purrr::map(band, lm5, x = refCompPre))
+save(funcs.8, funcs.5, file = 'models/landsat_poly_corrs.Rdata')
+
+
 refCompPost <- refCompPre %>%
-  mutate(blue = ifelse(sat == '5', blue - 2, ifelse(sat == '8', blue + 77, blue)),
-         green = ifelse(sat == '5', green - 30, ifelse(sat == '8', green + 53, green)),
-         nir = ifelse(sat == '5', nir - 20, ifelse(sat == '8', nir + 139, nir)),
-         red = ifelse(sat == '5', red - 32, ifelse(sat == '8', red + 59, red)),
+  mutate(uniqueID = row_number()) %>%
+  select(uniqueID, blue:nir, sat) %>%
+  gather(blue:nir, key = 'band' , value = 'value') %>%
+  spread(sat, value) %>%
+  group_by(band) %>%
+  nest() %>%
+  left_join(funcs.8) %>%
+  left_join(funcs.5) %>%
+  mutate(pred8 = map2(lm8, data, predict),
+         pred5 = map2(lm5, data, predict)) %>%
+  select(-c(lm8,lm5)) %>%
+  unnest(data, pred8, pred5) %>%
+  select(-c(l8,l5)) %>%
+  rename(l8 = pred8, l5 = pred5) %>% gather(l5,l7,l8, key = 'sat', value = 'value') %>%
+  spread(band, value) %>%
+  na.omit() %>%
+  left_join(refCompPre[,c('year','source','COMID','uniqueID')]) %>%
+  mutate(correction = 'Post.Correction',
          NR = nir/red,
          BG = blue/green,
          dWL = fui.hue(red, green, blue))
 
 
-## Before and after figures
-#5 and 7
-p1 <- refCompPre %>% filter(year > 1999, year < 2012) %>% gather(red, blue, green, nir, key = 'Band', value = 'value') %>% mutate(correction = 'Pre.Correction') %>% 
-  bind_rows(refCompPost %>% filter(year > 1999, year < 2012) %>% gather(red, blue, green, nir, key = 'Band', value = 'value') %>% mutate(correction = 'Post.Correction')) %>%
-  ggplot(., aes(x = value, color = sat, linetype = source)) + geom_density() + facet_grid(Band~correction, scales = 'free') + scale_color_viridis_d(end = .3) + theme_bw() + theme(legend.position = 'none') + ggtitle('Landsat 5 and 7 SR Distributions')
-
-p2 <- refCompPre %>% filter(year > 1999, year < 2012) %>% mutate(value = dWL, Band = 'dWL', correction = 'Pre.Correction') %>% bind_rows(refCompPost %>% filter(year > 1999, year < 2012) %>% mutate(value = dWL, Band = 'dWL', correction = 'Post.Correction')) %>%  ggplot(., aes(x = value, color = sat, linetype = source)) + geom_density() + facet_grid(Band~correction, scales = 'free') + scale_color_viridis_d(end = .3) + theme_bw() + theme(legend.position = 'none') + ggtitle('Resulting Dominant Wavelength')
-
-p3 <- refCompPre %>% filter(year > 1999, year < 2012) %>% mutate(BG = blue/green, NR = nir/red, correction = 'Pre.Correction') %>%
-  gather(NR,BG, key = 'Band', value = 'value') %>% bind_rows(refCompPost %>% filter(year > 1999, year < 2012) %>% mutate(BG = blue/green, NR = nir/red, correction = 'Post.Correction') %>% gather(NR,BG, key = 'Band', value = 'value')) %>%  ggplot(., aes(x = value, color = sat, linetype = source)) + geom_density() + facet_grid(Band~correction, scales = 'free') + scale_color_viridis_d(end = .3) + theme_bw() + theme(legend.position = 'bottom') + scale_x_continuous(limits = c(0,3)) + ggtitle('Resulting Ratios')
-
-g <- grid.arrange(p1,p2,p3, ncol = 1, heights = c(5,3,4))
-
-ggsave('figures/5_7_CorrectionsComps_NLA.png', g, width = 4, height = 9, units = 'in')
-
-
-## 7 and 8
-p1 <- refCompPre %>% filter(year > 2012) %>% gather(red, blue, green, nir, key = 'Band', value = 'value') %>% mutate(correction = 'Pre.Correction') %>% 
-  bind_rows(refCompPost %>% filter(year > 2012) %>% gather(red, blue, green, nir, key = 'Band', value = 'value') %>% mutate(correction = 'Post.Correction')) %>%
-  ggplot(., aes(x = value, color = sat, linetype = source)) + geom_density() + facet_grid(Band~correction, scales = 'free') + scale_color_viridis_d(begin = .3, end = .7) + theme_bw() + theme(legend.position = 'none') + ggtitle('Landsat 7 and 8 SR Distributions')
-
-p2 <- refCompPre %>% filter(year > 2012) %>% mutate(value = dWL, Band = 'dWL', correction = 'Pre.Correction') %>% bind_rows(refCompPost %>% filter(year > 2012) %>% mutate(value = dWL, Band = 'dWL', correction = 'Post.Correction')) %>%  ggplot(., aes(x = value, color = sat, linetype = source)) + geom_density() + facet_grid(Band~correction, scales = 'free') + scale_color_viridis_d(begin = .3, end = .7) + theme_bw() + theme(legend.position = 'none') + ggtitle('Resulting Dominant Wavelength')
-
-p3 <- refCompPre %>% filter(year > 2012) %>% mutate(BG = blue/green, NR = nir/red, correction = 'Pre.Correction') %>%
-  gather(NR,BG, key = 'Band', value = 'value') %>% bind_rows(refCompPost %>% filter(year > 2012) %>% mutate(BG = blue/green, NR = nir/red, correction = 'Post.Correction') %>% gather(NR,BG, key = 'Band', value = 'value')) %>%  ggplot(., aes(x = value, color = sat, linetype = source)) + geom_density() + facet_grid(Band~correction, scales = 'free') + scale_color_viridis_d(end = .3) + theme_bw() + theme(legend.position = 'bottom') + scale_x_continuous(limits = c(0,3)) + ggtitle('Resulting Ratios')
-
-g <- grid.arrange(p1,p2,p3, ncol = 1, heights = c(5,3,4))
-
-
-ggsave('figures/7_8_CorrectionsComps_NLA.png', g, width = 4, height = 9, units = 'in')
+check <- funcs.5$lm5[funcs.5$band == 'nir'][[1]]
 
 ```
-
-## Finally take a look at the correlations between various bands/ratios and AOD
-
-
-```{r}
-
-
-
-
-```
-
-
 

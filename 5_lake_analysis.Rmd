@@ -38,27 +38,6 @@ library(boot)
 ```
 
 # This document details the primary results of regionalized bootstrapping for remotely sensed lake water clarity timeseries.
-
-```{r}
-# Bring in all the necessary stoof
-iteration = 'FFS_DistNorm_noLn_Secchi'
-lakeSamp = 'EcoReg2000'
-log = F
-region = st_read('in/NLA/NLA_Ecoregions/EcoRegsMerged.shp')
-load(paste0('models/',iteration,'.Rdata'))
-source('0_ModellingFunctions.R')
-
-Preds.out <- read_feather(paste0('out/TS_Preds/', lakeSamp, '_',iteration,'.feather'))
-
-if(lakeSamp == 'NLA'){
-  lake.join <- read_feather('out/NLA2012LakesFull.feather')
-  }else if(lakeSamp == 'EcoReg2000'){
-    lake.join <- read_feather('out/EcoReg2000LakesFull.feather')
-  }
-
-```
-
-
 ## First, compare the predictions with NLA values as a final validation
 
 ```{r}
@@ -81,7 +60,7 @@ nlaFull <- nla.2007 %>%
          year = year(date),
          month = month(date),
          region = factor(region, 
-                         labels = c("Coastal Plain", "Northern Appalachians", "Northern Plains", "Southern Appalachians", "Southern Plains", "Temperate Planes", "Upper Midwest","Western Mountains","Xeric West"))) %>%
+                         labels = c("Coastal Plain", "Northern Appalachians", "Northern Plains", "Southern Appalachians", "Southern Plains", "Temperate Plains", "Upper Midwest","Western Mountains","Xeric West"))) %>%
   group_by(SITE_ID, region, nla.year) %>%
   summarise(secchi = median(secchi, na.rm = T)) %>%
   group_by(region, nla.year) %>%
@@ -91,16 +70,33 @@ nlaFull <- nla.2007 %>%
             secchi.sd = sd(secchi, na.rm =T)) %>%
   mutate(source = 'NLA')
 
-predComp <- Preds.out %>% 
+ids <- list.files('lake_data/NLA2007_cntr') %>% strsplit(split = '.csv', fixed = T) %>% unlist()
+lakesDown <- list.files('lake_data/NLA2007_cntr', full.names = T)
+lake.join <- read_feather('out/NLA2007LakesFull.feather')
+## Bad form, but you need to comment out part of the function for this because
+## there's no l8 involved and it'll throw errors otherwise.
+plan(multiprocess(workers = availableCores()-4))
+
+nla.2007.preds <- ids %>% future_map_dfr(~EvalPreds(id = .,paths = lakesDown, lakesUp = lake.join, log = log, model = model, features = features, lakeSamp = lakeSamp), .progress = T)
+
+plan(sequential)
+
+nla.2007.preds <- nla.2007.preds %>% mutate(region = factor(region, 
+                         labels = c("Coastal Plain", "Northern Appalachians", "Northern Plains", "Southern Appalachians", "Southern Plains", "Temperate Plains", "Upper Midwest","Western Mountains","Xeric West")))
+#write_feather(nla.2007.preds, 'out/nla2007_preds.feather')
+
+predComp <- nla.2007.preds %>% 
+  filter(month %in% c(5:9)) %>%
+  bind_rows(Preds.out %>%
+  filter(month %in% c(5:9), year == 2012)) %>%
   mutate(source = 'Landsat') %>%
   na.omit() %>%
-  filter(month %in% c(5:9), year %in% c(2007,2012)) %>%
   group_by(year, region, source) %>%
   summarise(secchi.mean = mean(value, na.rm = T),
             secchi.median = median(value, na.rm = T),
-            secchi.sd = sd(value, na.rm =T)) %>%
+            secchi.sd = sd(value, na.rm =T))  %>%
   bind_rows(nlaFull)
-
+  
 ggplot(predComp, aes(x = region, color = source)) +
   geom_point(aes(y = secchi.mean)) +
   #geom_point(aes(y = secchi.median)) +
@@ -118,6 +114,7 @@ rmse(check$NLA, check$Landsat)
 bias(check$NLA, check$Landsat)
 mape(check$NLA, check$Landsat)
 mae(check$NLA, check$Landsat)
+
 ```
 
 ## Pull out median summer values first by lake and then region to examine non-monotic trends.
@@ -237,7 +234,6 @@ meanFull <- fieldMean %>%
   bind_rows(read_feather('out/TS_Preds/EcoReg2000_bootstrapped.feather') %>%
               mutate(source = 'Random'))
 
-
 meanFull %>%
   filter(year < 2019, year > 1984) %>%
   filter(source != 'In.Situ') %>%
@@ -345,7 +341,7 @@ mk <- summ.meds %>% filter(COMID %in% counts$COMID) %>%
   left_join(lake.join) %>%
   mutate(sizeQuant = cut(areasqkm, breaks = c(0,.5,1,10,1000)))
 
-ggplot(mk, aes(x = sen.slope)) + geom_density(aes(color = sizeQuant)) + facet_wrap(~region, scales = 'free')
+ggplot(mk, aes(x = sen.slope)) + geom_histogram() + facet_wrap(~region, scales = 'free') + theme_bw() + ggtitle('Distribution of Lake Trends by Region')
 
 mk %>% st_as_sf(., coords = c('long','lat'), crs = 4326) %>% st_transform(st_crs(region)) %>%
   ggplot(.) +   geom_sf(data = region) + geom_sf(aes(color = sen.slope, alpha = sig)) +
@@ -353,8 +349,6 @@ mk %>% st_as_sf(., coords = c('long','lat'), crs = 4326) %>% st_transform(st_crs
   scale_alpha_discrete(breaks = c(T,F), limits = c(1,.3), labels = c('True', 'False'))
 
 ```
-
-
 
 
 ##Quick look at how many obs we're averaging over for each month
@@ -680,10 +674,12 @@ corr.t %>%
         #rect = element_blank(),
         legend.position = 'bottom') +
   labs(fill = 'Correlation\nCoefficient', color = 'P.Value < 0.05',
-       title = 'Potential Correlates with Seasonality and Overall Trend') +
+       title = 'Potential Correlates with Overall Trend') +
   guides(color = guide_legend(label = F))
 
 ggsave(paste0('figures/',mod,'RegionalCorrelates.png'), height = 7, width = 7.5, units = 'in')
+
+
 
 ## Plotly code for zooming in and looking at the data
 # bootstrapped.full %>%
@@ -702,117 +698,6 @@ ggsave(paste0('figures/',mod,'RegionalCorrelates.png'), height = 7, width = 7.5,
 ```
 
 
-## Take a look at auto-correlations
-
-```{r, include = F, eval = F}
-acf <- stl.boots.mean %>%
-  group_by(region) %>%
-  nest() %>%
-  mutate(acf = purrr::map(data, ~acf(.$raw, lag.max = 360, na.action = na.pass)),
-         lag = purrr::map(acf, 'lag'),
-         acf = purrr::map(acf, 'acf')) %>%
-  select(-data) %>%
-  unnest() %>%
-  mutate(lag = lag/12 + 1984)
-
-ggplot(acf, aes(x = lag, y = acf)) + geom_col() + facet_wrap(~region, scales = 'free')
-
-## Look at how the different regions are correlated to each other
-cor <- stl.boots.mean %>%
-  select(region, trend, date) %>%
-  spread(region, trend) %>%
-  select(-date) %>%
-  corrgram(., order = T, upper.panel=panel.conf)
-
-
-## Look at lagged cross correlations
-ccf <- bootstrapped.full %>%
-  select(region, trend, seasonal, NH4, NO3, SO4, pH, PDO, ISO, Precip, Temp) %>%
-  gather(NH4:Temp, key = 'Metric', value = 'Conc') %>%
-  group_by(region, Metric) %>%
-  nest() %>%
-  mutate(ccf = purrr::map(data, ~ccf(.x$seasonal, .x$Conc, lag.max = 36, na.action = na.pass, plot = F)),
-         lag = purrr::map(ccf, 'lag'),
-         ccf = purrr::map(ccf, 'acf')) %>%
-  select(-data) %>%
-  unnest() %>%
-  mutate(lag = lag/12)
-
-ggplot(ccf %>% filter(Metric == 'Precip'), aes(x = lag, y = ccf)) + geom_line() + facet_wrap(region~Metric, scales = 'free') + geom_hline(yintercept = -.3, color = 'blue', alpha = .4)
-
-```
-
-## Test with ~469 lakes in HUC 7, Upper Mississippi
-
-```{r, include = F, eval = F}
-yearly.nest <- Preds.out %>%
-  mutate(date = as.POSIXct(paste0(year,'/',month,'/',01)))
-
-dummy <- expand.grid(year = seq(1984,2018), month = c(1:12), samp = factor(c(100,200,300,400,463)))
-
-samps <- tibble(COMID = sample(unique(yearly.nest$COMID), 100), samp = 100) %>%
-  bind_rows(tibble(COMID = sample(unique(yearly.nest$COMID), 200), samp = 200)) %>%
-  bind_rows(tibble(COMID = sample(unique(yearly.nest$COMID), 300), samp = 300)) %>%
-  bind_rows(tibble(COMID = sample(unique(yearly.nest$COMID), 400), samp = 400)) %>%
-  bind_rows(tibble(COMID = unique(yearly.nest$COMID), samp = 463))
-
-yearly.median <- Preds.out %>%
-  inner_join(samps %>% mutate(samp = factor(samp))) %>%
-  filter(year < 2019) %>%
-  group_by(year, month, samp, season) %>%
-  dplyr::summarizemedian = median(value, na.rm = T),
-            sd = sd(value, na.rm =T),
-            count = n()) %>%
-  right_join(dummy)%>%
-  mutate(date = as.POSIXct(paste0(year,'/',month,'/',01))) %>%
-  arrange(samp, date)
-
-ggplot() + 
-  geom_line(data = yearly.nest %>% filter(region == '3'), aes(group = COMID, x = date, y = value, color = 'Individual Lake'), alpha = .2) + 
- geom_ribbon(data = yearly.median %>% filter(region == '3'), aes(x = date, ymin = median - .12, ymax = median + .12, fill = '95% Confidence\nInterval'), alpha = .9) +
-  geom_line(data = yearly.median %>% filter(region == '3'), aes(x = date, y = median, color = 'Watershed Median')) +
-  labs(x = 'Date', y = 'Water Clarity (m)', title = 'Individual Lake Timeseries', color = 'Time Series', fill = '') +
-  scale_color_manual(values = c('black', 'red')) +
-  scale_fill_manual(values = 'pink') +
-  theme_bw()
-
-stl <- yearly.median %>%
-  group_by(samp) %>%
-  nest() %>%
-  mutate(stl = purrr::map(data, ~stlplus(x = .$median, t = .$date, n.p = 12, s.window = 25, sub.labels = c(1:12))),
-         date = purrr::map(stl, 'time'),
-         stl = purrr::map(stl, 'data')) %>%
-  select(-data) %>%
-  unnest() %>%
-  mutate(year = year(date)) %>%
-  group_by(year, samp) %>%
-  mutate(seas.max = max(seasonal),
-         seas.min = min(seasonal),
-         seas.mag = seas.max-seas.min) %>%
-  ungroup()
-
-stl %>%
-  gather(raw:remainder, key = 'Component', value = 'Value') %>%
-  ggplot(., aes(date, Value, color = samp)) +
-  geom_line() +
-  labs(title = 'Decomposition Comparison by Sample size', color = 'Sample\nSize') +
-  facet_wrap(~Component, scales = 'free')
-
-stl %>%
-  gather(raw:remainder, key = 'Component', value = 'Value') %>%
-  ggplot(.) +
-  geom_freqpoly(aes(x = Value, y =stat(density), color = samp)) +
-  labs(title = 'Decomposition Comparison by Sample size', color = 'Sample\nSize') +
-  facet_wrap(~Component, scales = 'free')
-
-stl %>%
-  gather(raw:remainder, key = 'Component', value = 'Value') %>%
-  ggplot(.) +
-  geom_violin(aes(x = samp, y = Value), draw_quantiles = c(.25,.5,.75)) +
-  labs(title = 'Decomposition Comparison by Sample size', x = 'Sample Size') +
-  facet_wrap(~Component, scales = 'free')
-
-```
 
 ## Cluster analysis
 ```{r, include = F, eval = F}
@@ -889,123 +774,6 @@ grid.arrange(grobs = list(clustTrends, hucSamples), nrow = 2)
 # names(pc_k) <- paste0("k_", 3L:6L)
 # sapply(pc_k, cvi, type = "internal")
 ```
-
-## PCA to look at similarities
-```{r, include = F, eval = F}
-library(factoextra)
-library(FactoMineR)
-
-t.pca <- huc2.full %>% 
-  select(region, date, trend_mean) %>%
-  mutate(year = year(date)) %>%
-  group_by(year, region) %>%
-  dplyr::summarize(trend = mean(trend_mean, na.rm = T)) %>%
-  group_by(region) %>%
-  mutate(trend = scale(trend)) %>%
-  ungroup() %>%
-  spread(key = year, value = trend) %>%
-  #arrange(year) %>%
-  column_to_rownames(.,'region')#%>%
-  #as.data.frame() %>%
-  #select(-year) %>%
-  svd()
-
-write.csv(t.pca, 'out/TedData.csv')
-fviz_eig(t.pca)
-
-fviz_pca_var(t.pca,
-             col.var = "contrib", # Color by contributions to the PC
-             gradient.cols = c("#00AFBB", "#E7B800", "#FC4E07"),
-             repel = TRUE     # Avoid text overlapping
-             )
-
-fviz_pca_ind(t.pca,
-             col.ind = "cos2", # Color by the quality of representation
-             gradient.cols = c("#00AFBB", "#E7B800", "#FC4E07"),
-             repel = TRUE     # Avoid text overlapping
-             )
-
-fviz_pca_biplot(t.pca, repel = TRUE,
-                col.var = "#2E9FDF", # Variables color
-                col.ind = "#696969"  # Individuals color
-                )
-
-
-t.pca$var$coord
-
-```
-
-NLA Comparison
-
-```{r}
-nla.2007 <- read.csv('in/NLA/nla2007_secchi_20091008.txt', stringsAsFactors = F) %>%
-  select(SITE_ID, secchi = SECMEAN, date = DATE_SECCHI) %>%
-  left_join(read.csv('in/NLA/nla2007_sampledlakeinformation_20091113.txt') %>%
-              select(SITE_ID, COMID = COM_ID, region = WSA_ECO9, 
-                     lat = LAT_DD, long = LON_DD))
-
-nla.2012 <- read.csv('in/NLA/nla2012_secchi_08232016.txt', stringsAsFactors = F) %>%
-  select(SITE_ID, secchi = SECCHI, date = DATE_COL) %>%
-  left_join(read.csv('in/NLA/nla2012_wide_siteinfo_08232016.txt') %>%
-              select(SITE_ID, COMID = COMID2012, region = AGGR_ECO9_2015, 
-                     lat = LAT_DD83, long = LON_DD83))
-
-nlaFull <- nla.2007 %>%
-  mutate(nla.year = 2007) %>%
-  bind_rows(nla.2012 %>% mutate(nla.year = 2012)) %>%
-  mutate(date = mdy(date),
-         year = year(date),
-         month = month(date),
-         region = factor(region, 
-                         labels = c("Coastal Plain", "Northern Appalachians", "Northern Plains", "Southern Appalachians", "Southern Plains", "Temperate Planes", "Upper Midwest","Western Mountains","Xeric West"))) %>%
-  group_by(SITE_ID, region, nla.year) %>%
-  summarise(secchi = median(secchi, na.rm = T)) %>%
-  group_by(region, nla.year) %>%
-  rename(year = nla.year) %>%
-  summarise(secchi.mean = mean(secchi, na.rm = T),
-            secchi.median = median(secchi, na.rm = T),
-            secchi.sd = sd(secchi, na.rm =T)) %>%
-  mutate(source = 'NLA')
-
-predComp <- Preds.out %>% filter(year %in% c(2007,2012),
-                                 month %in% c(5:9)) %>%
-  group_by(region, year) %>%
-  summarise(secchi.mean = mean(value, na.rm = T),
-            secchi.median = median(value, na.rm = T),
-            secchi.sd = sd(value, na.rm =T)) %>%
-  mutate(source = 'RS') %>%
-  bind_rows(nlaFull)
-
-ggplot(predComp, aes(x = region, color = source)) +
-  geom_point(aes(y = secchi.mean)) +
-  geom_errorbar(aes(ymin = secchi.mean - secchi.sd, ymax = secchi.mean + secchi.sd)) +
-  scale_color_viridis_d(end = .6) +
-  facet_wrap(~year) +
-  theme_bw() +
-  theme(axis.text.x = element_text(angle = 90, hjust = 1)) +
-  labs(x = 'Region', y = 'Water Clarity (m)', title = 'Comparison of NLA to Remotely Sensed Predictions')
-
-
-predComp <- Preds.out %>% filter(year %in% c(2007,2012),
-                                 month %in% c(5:9)) %>%
-  select(region, secchi = value, year) %>%
-  mutate(source = 'RS') %>%
-  bind_rows(nla.2007 %>% select(region, secchi) %>%
-              mutate(source = 'NLA', year = 2007)) %>%
-  bind_rows(nla.2012 %>% select(region, secchi) %>%
-              mutate(source = 'NLA', year = 2012))
-
-ggplot(predComp, aes(x = region, y = secchi, color = source)) + 
-  geom_violin()  + 
-  scale_color_viridis_d(end = .6) +
-  scale_y_continuous(limits = c(0,10)) +
-  facet_wrap(~year, ncol = 2) +
-  theme_bw() +
-  theme(axis.text.x = element_text(angle = 90, hjust = 1))
-        
-        
-```
-
 
 
 # Quick look at seasonality
