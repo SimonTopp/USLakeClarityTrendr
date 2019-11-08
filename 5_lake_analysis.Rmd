@@ -41,6 +41,24 @@ library(boot)
 ## First, compare the predictions with NLA values as a final validation
 
 ```{r}
+
+# ids <- list.files('lake_data/NLA2007_cntr') %>% strsplit(split = '.csv', fixed = T) %>% unlist()
+# lakesDown <- list.files('lake_data/NLA2007_cntr', full.names = T)
+# lake.join <- read_feather('out/NLA2007LakesFull.feather')
+# ## Bad form, but you need to comment out part of the function for this because
+# ## there's no l8 involved and it'll throw errors otherwise.
+# plan(multiprocess(workers = availableCores()-4))
+# 
+# nla.2007.preds <- ids %>% future_map_dfr(~EvalPreds(id = .,paths = lakesDown, lakesUp = lake.join, log = log, model = model, features = features, lakeSamp = lakeSamp), .progress = T)
+# 
+# plan(sequential)
+# 
+# nla.2007.preds <- nla.2007.preds %>% mutate(region = factor(region,
+#                          labels = c("Coastal Plain", "Northern Appalachians", "Northern Plains", "Southern Appalachians", "Southern Plains", "Temperate Plains", "Upper Midwest","Western Mountains","Xeric West")))
+# write_feather(nla.2007.preds, 'out/nla2007_preds.feather')
+
+nla.2007.preds <- read_feather('out/nla2007_preds.feather')
+
 nla.2007 <- read.csv('in/NLA/nla2007_secchi_20091008.txt', stringsAsFactors = F) %>%
   select(SITE_ID, secchi = SECMEAN, date = DATE_SECCHI) %>%
   left_join(read.csv('in/NLA/nla2007_sampledlakeinformation_20091113.txt') %>%
@@ -52,7 +70,6 @@ nla.2012 <- read.csv('in/NLA/nla2012_secchi_08232016.txt', stringsAsFactors = F)
   left_join(read.csv('in/NLA/nla2012_wide_siteinfo_08232016.txt') %>%
               select(SITE_ID, COMID = COMID2012, region = AGGR_ECO9_2015, 
                      lat = LAT_DD83, long = LON_DD83))
-
 nlaFull <- nla.2007 %>%
   mutate(nla.year = 2007) %>%
   bind_rows(nla.2012 %>% mutate(nla.year = 2012)) %>%
@@ -70,20 +87,6 @@ nlaFull <- nla.2007 %>%
             secchi.sd = sd(secchi, na.rm =T)) %>%
   mutate(source = 'NLA')
 
-ids <- list.files('lake_data/NLA2007_cntr') %>% strsplit(split = '.csv', fixed = T) %>% unlist()
-lakesDown <- list.files('lake_data/NLA2007_cntr', full.names = T)
-lake.join <- read_feather('out/NLA2007LakesFull.feather')
-## Bad form, but you need to comment out part of the function for this because
-## there's no l8 involved and it'll throw errors otherwise.
-plan(multiprocess(workers = availableCores()-4))
-
-nla.2007.preds <- ids %>% future_map_dfr(~EvalPreds(id = .,paths = lakesDown, lakesUp = lake.join, log = log, model = model, features = features, lakeSamp = lakeSamp), .progress = T)
-
-plan(sequential)
-
-nla.2007.preds <- nla.2007.preds %>% mutate(region = factor(region, 
-                         labels = c("Coastal Plain", "Northern Appalachians", "Northern Plains", "Southern Appalachians", "Southern Plains", "Temperate Plains", "Upper Midwest","Western Mountains","Xeric West")))
-#write_feather(nla.2007.preds, 'out/nla2007_preds.feather')
 
 predComp <- nla.2007.preds %>% 
   filter(month %in% c(5:9)) %>%
@@ -152,6 +155,13 @@ counts <- summ.meds %>%
   filter(count > 10) %>%
   left_join(lake.join)
 
+##Quick figure illustrating proportion of lakes with data by year
+summ.meds %>%
+  filter(!is.na(value)) %>%
+  group_by(COMID, year) %>%
+  summarise(dataFrac = n()/2270) %>%
+  ggplot(., aes(x = year, y = dataFrac)) + geom_col()
+
 ####  Create wide dataset 
 summ.meds.wide <- summ.meds %>%
   filter(COMID %in% counts$COMID) %>%
@@ -193,19 +203,19 @@ summaryMK <- bootstrapped.ts %>%
          sen.slope = sen.slope*100,
          p.value = purrr::map_dbl(mk, 'p.value'),
          p.value = round(p.value, 5),
-         sig = ifelse(p.value < 0.1, 'yes', NA)) %>%
+         sig = ifelse(p.value < .01, '***', ifelse(p.value < .05, '**', ifelse(p.value < 0.1, '*', NA)))) %>%
   select(-data, -mk)
 
 ## Finally plot up Man-Kendal results
 summaryMK %>%
   left_join(region) %>%
   rowwise() %>%
-  mutate(coords.x = st_centroid(geometry)[1],
-    coords.y = st_centroid(geometry)[2]) %>%
+  mutate(coords.x = st_point_on_surface(geometry)[1],
+    coords.y = st_point_on_surface(geometry)[2]) %>%
   ungroup() %>%
   ggplot() +
-    geom_sf(aes(fill = sen.slope, color = sig)) +
-    #geom_text(aes(x = coords.x, y = coords.y, label = region), color = 'white') +
+    geom_sf(aes(fill = sen.slope)) +
+    geom_text(aes(x = coords.x, y = coords.y, label = sig), size = 4, color = 'red') +
     theme(axis.text.x = element_blank(),
           axis.text.y = element_blank(),
           axis.ticks = element_blank(),

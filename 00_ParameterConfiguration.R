@@ -18,9 +18,10 @@ log = F
 
 ##Identify work stage
 stage = 5
-if(stage > 1){
+if(stage > 2){
   #Landsat Correction Models
   load('models/landsat_poly_corrs.Rdata')
+  output <- read_feather(paste0('out/outputs/',iteration, '.feather'))
 }
 
 if(stage > 3){

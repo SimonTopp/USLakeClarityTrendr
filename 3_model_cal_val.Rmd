@@ -1,0 +1,298 @@
+---
+title: "__FFS and Spatial CV"
+author: "Simon Topp"
+date: "8/27/2019"
+output: html_document
+editor_options: 
+  chunk_output_type: console
+---
+# This script takes the munged optical and landscape data and runs it through various feature selection algorithms to determine the inputs for the final models.
+
+```{r setup, eval = F}
+library(tidyverse)
+library(feather)
+library(viridis)
+library(knitr)
+library(sf)
+library(rgdal)
+library(maps)
+library(magrittr)
+library(mlbench)
+library(caret)
+library(doParallel)
+library(furrr)
+library(lubridate)
+library(groupdata2)
+library(CAST)
+library(mapview)
+library(onehot)
+library(Metrics)
+library(kableExtra)
+library(ggpmisc)
+```
+
+
+```{r Eval}
+evals <- output %>%
+  summarise(rmse = rmse(Actual, Predicted),
+            mae = mae(Actual, Predicted),
+            mape = mape(Actual, Predicted),
+            bias = bias(Actual, Predicted),
+            p.bias = percent_bias(Actual, Predicted),
+            smape = smape(Actual, Predicted)) %>%
+  mutate(iteration = iteration)
+
+evals %>% kable(digits = 2) %>% kable_styling() %>% scroll_box(width = '4in')
+
+ggplot(output, aes(x = Actual +.5, y = Predicted +.5)) + 
+  geom_hex(aes(fill = ..count..)) + 
+  scale_fill_viridis(name = 'Point\nCount', trans = 'log10') + 
+  geom_abline(color = 'red') + 
+  stat_poly_eq(aes(label =  paste(stat(adj.rr.label))),
+               formula = y~x, parse = TRUE, 
+               label.y = Inf, vjust = 1.3) +
+  #scale_x_continuous(trans = 'log10', labels = scales::comma) +
+  #scale_y_continuous(trans = 'log10', labels = scales::comma) +
+  #coord_equal(ratio = 1) +
+  labs(title = 'Hold-Out Validation', subtitle = 'Red line is 1:1', x = 'Actual', y = 'Predicted')
+
+ggsave('figures/ModelValidation.png', width = 4, height = 3.5, units = 'in')
+
+output.full <- output %>%
+  left_join(srMunged, by = 'UniqueID') %>%
+  mutate(residual = Actual - Predicted,
+         year = year(date),
+         month = month(date))
+
+##look for errors associated with certain things
+output.full %>% ggplot(., aes(x = residual, y = AOD)) + geom_hex()
+
+## Some weird hacks for reordering factors
+reorder_within <- function(x, by, within, fun = mean, sep = "___", ...) {
+  new_x <- paste(x, within, sep = sep)
+  stats::reorder(new_x, by, FUN = fun)
+}
+
+scale_x_reordered <- function(..., sep = "___") {
+  reg <- paste0(sep, ".+$")
+  ggplot2::scale_x_discrete(labels = function(x) gsub(reg, "", x), ...)
+}
+
+## Summary metrics across space time and observed value
+errorSum <- output.full %>%
+  #filter(Param == 'secchi') %>%
+  mutate(Observed.Value = Actual) %>%
+  rename(Year = year, Latitude = lat, Longitude = long) %>%
+  gather(Observed.Value, Year, Latitude, Longitude, key = 'Variable', value = 'Value') %>%
+  group_by(Variable, log) %>%
+  mutate(quantile = cut_number(Value, 10, right = F, labels = F),
+         quantLabs = cut_number(Value, 10,  right = F, dig.lab = 1)) %>%
+  ungroup() %>%
+  group_by(quantile, quantLabs, Variable, log) %>%
+  dplyr::summarise(mae = mae(Actual, Predicted),
+            smape = smape(Actual, Predicted),
+            p.bias = percent_bias(Actual, Predicted),
+            #mae = mae(Actual, Predicted),
+            bias = bias(Actual, Predicted)) %>%
+  gather(mae:bias, key = 'Metric', value = 'Error') %>%
+  as.data.frame() %>%
+  arrange(Variable, quantile) %>%
+  mutate(order = row_number())
+
+spaceTimeFigs()
+spaceTimeFigs(abs = F)
+
+output.full %>% mutate(yearGroups = cut_number(year, 20)) %>%
+  ggplot(., aes(x = yearGroups, y = residual)) + 
+  #geom_boxplot() +
+  geom_violin(draw_quantiles = c(.25,.5,.75)) + 
+  theme(axis.text.x = element_text(angle = 90, vjust = .5))
+  
+  group_by(yearGroups) %>%
+  summarise(mean.residual = mean(residual),
+            sd.residual = sd(residual)) %>%
+  ggplot(., aes(x = yearGroups, y = mean.residual)) + geom_point() + geom_errorbar(aes(ymin = mean.residual - sd.residual, ymax = mean.residual + sd.residual)) + theme(axis.text.x = element_text(angle = 90, vjust = .5))
+  
+##View the feature importance
+model$modelInfo$varImp(model$finalModel) %>%
+  mutate(Feature = fct_reorder(rownames(.), Overall, .desc = T)) %>%
+  arrange(Overall) %>%
+  ggplot(., aes(x = Feature, y = Overall)) + geom_col() + coord_flip() +
+  ggtitle('Feature Importance')
+
+ggsave('figures/FeatImp.png', width = 3.5, height = 3, units = 'in')
+```
+
+
+
+```{r, fig.height= 8}
+output.full %>% 
+  group_by(sat) %>%
+  summarise(mae = mae(Actual, Predicted),
+            smape = smape(Actual, Predicted),
+            p.bias = percent_bias(Actual, Predicted),
+            #mae = mae(Actual, Predicted),
+            bias = bias(Actual, Predicted)) %>%
+  gather(mae:bias, key = 'Metric', value = 'Error') %>%
+  ggplot(., aes(x = Metric, y = Error, fill = sat)) +
+  geom_col(position = 'dodge') +
+  theme_bw() + 
+  ggtitle('Absolute and Relative Error by Satellite')
+  
+val.conf <- output.full %>%
+  mutate(smape = 2*(abs(Actual - Predicted)/(abs(Actual) + abs(Predicted))),
+         p.bias = (Actual - Predicted)/abs(Actual)) %>%
+  group_by(region, sat, log) %>%
+  summarise(smape = sd(smape),
+            p.bias = sd(p.bias)) %>%
+  mutate(p.bias = ifelse(is.na(p.bias), 0, p.bias),
+         smape = ifelse(is.na(smape), 0, smape)) %>%
+  gather(smape, p.bias, key = 'Metric', value = 'sd')
+  
+output.full %>%
+  group_by(region, sat, log) %>%
+  summarise(smape = smape(Actual, Predicted),
+            p.bias = percent_bias(Actual, Predicted),
+            count = n()) %>%
+  gather(smape:p.bias, key = 'Metric', value = 'value') %>%
+  left_join(val.conf %>% select(region, sat, Metric, sd)) %>%
+  ggplot(.) +
+  scale_fill_viridis_c(trans = 'log10') +
+  #geom_text(x = .5, y = .5) +
+  geom_col(position = 'dodge', aes(x = Metric, y = value, fill = count, color = sat, group = sat)) +
+  geom_errorbar(position = position_dodge(.9), aes(x = Metric, ymin = value - sd, ymax = value + sd, group = sat), width = .2) +
+  #scale_y_continuous(labels = scales::percent) +
+  theme(legend.position = 'top') +
+  ggtitle('Error by region') +
+  facet_wrap(~region, scales = 'free')#, ncol = 4)
+
+ggplot(output.full, aes(x = residual, color = sat)) + geom_density() + facet_wrap(~region)
+
+
+ggplot(output.full, aes(x = Actual, y = Predicted)) + 
+  geom_point(alpha = .3) +
+  geom_smooth(method = 'lm', aes(color = sat)) +
+  #scale_fill_viridis(name = 'Point\nCount', trans = 'log10') + 
+  #geom_abline(color = 'red') + 
+  stat_poly_eq(aes(label =  paste(stat(adj.rr.label))),
+               formula = y~x, parse = TRUE, 
+               label.y = Inf, vjust = 1.3) +
+  #scale_x_continuous(trans = 'log10', labels = scales::comma) +
+  #scale_y_continuous(trans = 'log10', labels = scales::comma) +
+  #coord_equal(ratio = 1) +
+  facet_wrap(~region, scales = 'free', shrink = T) +
+  labs(title = 'Regional Evaluation Performance') + theme_bw()
+
+ggsave('figures/RegionalEval.png', width = 6.5, height =6, units = 'in')
+
+dummy <- expand.grid(year = seq(1985,2018), month = c(1:12), region = factor(unique(region$region)))
+
+fieldmatch.coin <- output.full %>%
+  filter(year < 2019,
+         month %in% c(5:9)) %>%
+  rename(Modelled = Predicted, In.Situ = Actual) %>%
+  gather(Modelled, In.Situ, key = 'Measure', value = 'value') %>%
+  group_by(year, COMID, Measure, region) %>%
+  summarise(value = median(value)) %>%
+  group_by(year, Measure, region) %>%
+  summarise(mean = mean(value))
+
+
+ggplot(fieldmatch.coin, aes(x = year, y = mean, color = Measure)) + 
+  #geom_point(alpha = .1) +
+  geom_line() + 
+  scale_color_viridis_d(end = .6) +
+  facet_wrap(~region, scales = 'free', ncol = 2) +
+  labs(title = 'Smoothed SDD Trends By Region Using Coincident Testing Data') +
+  theme_bw() +
+  theme(legend.position = 'bottom')
+
+
+## Next do it with all the field data we got.  
+# We add the additional step of averaging per lake before per month because sampling is really uneven. 
+# Load in lagos and wqp data
+# sites <- read_feather('../Aquasat/2_rsdata/out/unique_site_inventory.feather')
+# 
+# wqp.lagos <- read_feather('../Aquasat/1_wqdata/out/wqp_lagos_unity.feather') %>%
+#   dplyr::select(SiteID, date_unity, source, value = secchi) %>%
+#   na.omit() %>%
+#   filter(value > 0.01, 
+#          value < 15) %>%
+#   left_join(sites) %>%
+#   filter(!is.na(lat)) %>%
+#   mutate(year = year(date_unity),
+#          month = month(date_unity)) %>%
+#   filter(month %in% c(5:9),
+#          year > 1983, year < 2019) %>%
+#   group_by(year, SiteID, lat, long) %>%
+#   dplyr::summarize(median = median(value),
+#                    count = n())
+# 
+# plan(multiprocess)
+# site.join <- wqp.lagos %>%
+#   ungroup() %>%
+#   distinct(SiteID, lat, long) %>%
+#   st_as_sf(coords = c('long', 'lat'), crs = 4326) %>%
+#   st_transform(st_crs(region)) %>%
+#   split(., c(1:10)) %>%
+#   future_map(~st_join(.,region, join = st_nearest_feature), .progress = T)
+# plan(sequential)
+# 
+# site.join <- rbind(site.join[[1]], site.join[[2]], site.join[[3]], site.join[[4]], site.join[[5]],
+#                     site.join[[6]], site.join[[7]], site.join[[8]], site.join[[9]], site.join[[10]])
+# 
+# fieldMean <- wqp.lagos %>%
+#   left_join(site.join) %>%
+#   group_by(year, region) %>%
+#   dplyr::summarize(mean = mean(median, na.rm = T),
+#             sd = sd(median, na.rm =T),
+#             count.obs = sum(count),
+#             count.sites = n())
+# 
+# write_feather(fieldMean, 'out/RegionalsInSituMeans.feather')
+
+## A little backwords but read in the bootstrapped predictions from 5_lake_analysis
+fieldmatch.full <- read_feather('out/RegionalsInSituMeans.feather') %>% mutate(Measure = 'In.Situ') %>%
+  select(year, region, mean, se = sd, Measure) %>% bind_rows(read_feather('out/TS_Preds/NLA_bootstrapped.feather') %>% mutate(Measure = 'Modelled'))
+
+
+p1 <- fieldmatch.coin %>%
+  ggplot(., aes(x = year, y = mean, color = Measure)) + 
+  geom_line() + 
+  scale_color_viridis_d(end = .6) +
+  facet_wrap(~region, scales = 'free_y', ncol = 1) +
+  labs(title = 'Coincident\nObservations') +
+  theme_bw() +
+  theme(legend.position = 'none',
+        axis.title = element_blank())
+
+p2 <- fieldmatch.full %>%
+  ggplot(., aes(x = year, y = mean, color = Measure)) + 
+  geom_line() + 
+  scale_color_viridis_d(end = .6) +
+  facet_wrap(~region, scales = 'free_y', ncol = 1) +
+  labs(title = 'All\nObservations') +
+  theme_bw() +
+  theme(legend.position = 'right',
+        axis.title = element_blank())
+
+g <- grid.arrange(p1,p2, ncol = 2, widths = c(1,1.7), left = 'Mean Clarity (m)', bottom = 'Year')
+
+
+ggsave('figures/CoinVFullObs.png', plot = g, width = 5.5, height = 9, units = 'in')
+
+
+##Fig for seminar pres
+fieldmatch.full %>% #filter(Measure == 'In.Situ') %>%
+  ggplot(., aes(x = year, y = mean, color = Measure)) + 
+  geom_line() + 
+  scale_color_viridis_d(end = .6) +
+  facet_wrap(~region, scales = 'free_y', ncol = 2) +
+  labs(title = 'Full Field and Satellite Observations') +
+  theme_bw() +
+  theme(legend.position = c(.75,.1),
+        axis.title = element_blank())
+
+ggsave('figures/Full_TS_field.png', width = 7, height = 6, units = 'in')
+```
+
