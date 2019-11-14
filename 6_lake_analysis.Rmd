@@ -13,28 +13,6 @@ knitr::opts_chunk$set(message = F)
 knitr::opts_chunk$set(warning = F)
 knitr::opts_chunk$set(results = 'hide')
 
-library(tidyverse)
-library(feather)
-library(viridis)
-library(knitr)
-library(sf)
-library(magrittr)
-library(rkt)
-library(lubridate)
-library(broom)
-library(furrr)
-library(plotly)
-library(corrgram)
-library(stlplus)
-library(gganimate)
-#library(raster)
-library(rgdal)
-library(gridExtra)
-library(scales)
-library(trend)
-library(kableExtra)
-library(Hmisc)
-library(boot)
 ```
 
 # This document details the primary results of regionalized bootstrapping for remotely sensed lake water clarity timeseries.
@@ -152,7 +130,7 @@ summ.meds <- Preds.out %>%
 counts <- summ.meds %>%
   group_by(COMID) %>%
   summarise(count = n()) %>%
-  filter(count > 10) %>%
+  #filter(count > 10) %>%
   left_join(lake.join)
 
 ##Quick figure illustrating proportion of lakes with data by year
@@ -224,7 +202,7 @@ summaryMK %>%
           legend.position = 'bottom') +
     scale_color_manual(values = 'red', breaks = 'yes') +
     scale_fill_viridis_c(option = 'cividis') +
-    labs(fill = 'Slope (cm/year)', color = 'P.Value < 0.1', title = 'MannKendall Slopes') +
+    labs(fill = 'Slope (cm/year)', title = 'MannKendall Slopes') +
     guides(color = guide_legend(label = F))
 
 write_feather(bootstrapped.ts, paste0('out/TS_Preds/',lakeSamp,'_bootstrapped.feather'))
@@ -239,10 +217,12 @@ fieldMean <- read_feather('out/RegionalsInSituMeans.feather')
 
 meanFull <- fieldMean %>% 
   mutate(source = 'In.Situ', se = NA, bias = NA) %>%
-  bind_rows(read_feather('out/TS_Preds/NLA_bootstrapped.feather') %>%
+  bind_rows(read_feather('out/TS_Preds/NLA2012_cntr_bootstrapped.feather') %>%
               mutate(source = 'NLA')) %>%
   bind_rows(read_feather('out/TS_Preds/EcoReg2000_bootstrapped.feather') %>%
-              mutate(source = 'Random'))
+              mutate(source = 'Random')) %>% 
+  bind_rows(read_feather('out/TS_Preds/Over10_bootstrapped.feather') %>%
+              mutate(source = 'Large.Lakes'))
 
 meanFull %>%
   filter(year < 2019, year > 1984) %>%
@@ -275,54 +255,126 @@ FieldMK <- fieldMean %>%
   select(-data, -mk)
 
 
-## Compare RS and in situ decompositions
+## Compare NLA and Large Random Sample
+lakes <- read_feather('out/NLA2012LakesFull.feather') %>%
+  mutate(sample = 'NLA.Sample') %>%
+  bind_rows(read_feather('out/EcoReg2000LakesFull.feather') %>% mutate(sample = 'Random.Sample')) %>%
+  st_as_sf(coords = c('long', 'lat'), crs = 4326)
+
 
 mk.full <- FieldMK %>%
   mutate(source = 'In.Situ') %>%
-  bind_rows(read_feather('out/TS_Preds/NLA_summaryMK.feather') %>%
-              mutate(source = 'NLA Sample')) %>%
+  bind_rows(read_feather('out/TS_Preds/NLA2012_cntr_summaryMK.feather') %>%
+              mutate(source = 'NLA.Sample')) %>%
   bind_rows(read_feather('out/TS_Preds/EcoReg2000_summaryMK.feather') %>%
-              mutate(source = 'Random Sample'))
+              mutate(source = 'Random.Sample')) %>%
+    bind_rows(read_feather('out/TS_Preds/Over10_summaryMK.feather') %>%
+              mutate(source = 'Large.Lakes.Sample')) %>%
+  mutate(source = factor(source, levels = c('NLA.Sample', 'Random.Sample', 'Large.Lakes.Sample')))
 
 trendDif <- mk.full %>%
   filter(source != 'In.Situ') %>%
   select(region, sen.slope, source) %>%
   spread(source, sen.slope) %>%
-  mutate(sen.slope = NLA - Random) %>%
+  mutate(NLA.minus.Random = NLA.Sample - Random.Sample,
+         NLA.minus.Large.Lakes = NLA.Sample - Large.Lakes.Sample) %>%
+  gather(NLA.minus.Random, NLA.minus.Large.Lakes, key = 'Group', value = 'Slope.Difference') %>%
   mutate(sig = NA, p.value = NA, source = 'Difference') %>%
-  left_join(region)
+  left_join(region %>% st_simplify(dTolerance = 500))
 
-p1 <- mk.full %>%
-  filter(source != 'In.Situ') %>%
-  left_join(region) %>%
+
+p1 <- ggplot(region %>% st_simplify(dTolerance = 500)) + geom_sf(aes(fill = region)) + 
+  geom_sf(data = lakes, aes(color = 'Lakes'), size = .3, color = 'black', alpha = .4) + 
+  theme(axis.text.x = element_blank(),
+          axis.text.y = element_blank(),
+          axis.ticks = element_blank(),
+          rect = element_blank(),
+          panel.grid.major = element_line(color = 'transparent'),
+          plot.margin = margin(0,0,-2, 0, 'cm'),
+        strip.text = element_text(face = 'bold')) +
+  scale_fill_viridis_d(name = "Region'") + 
+  facet_wrap(~sample)
+
+p2 <- mk.full %>%
+  filter(source != 'In.Situ', source != 'Large.Lakes.Sample') %>%
+  left_join(region %>% st_simplify(dTolerance = 500)) %>%
+  rowwise() %>%
+  mutate(coords.x = st_point_on_surface(geometry)[1],
+    coords.y = st_point_on_surface(geometry)[2]) %>%
+  ungroup() %>%
   ggplot() +
-    geom_sf(aes(fill = sen.slope, color = sig)) +
+    geom_sf(aes(fill = sen.slope), color = 'grey30') +
+    geom_text(aes(x = coords.x, y = coords.y, label = sig), size = 4, color = 'black') +
     theme(axis.text.x = element_blank(),
           axis.text.y = element_blank(),
           axis.ticks = element_blank(),
           rect = element_blank(),
           panel.grid.major = element_line(color = 'transparent'),
-          legend.position = 'bottom') +
-    scale_color_manual(values = 'red', breaks = 'yes') +
-    scale_fill_viridis_c(option = 'cividis') +
-    labs(fill = 'Slope (cm/year)', color = 'P.Value < 0.1', title = 'Thiel-Sen Slopes') +
+          legend.position = 'bottom',
+          plot.margin = margin(-2,0,0, 0, 'cm')) +
+    scale_fill_viridis_c(option = 'plasma', begin = .2) +
+    #scale_fill_gradient2(low='#F56217', high='#0B486B') +
+    labs(fill = 'Slope (cm/year)', x = '', y = '') +
     guides(color = guide_legend(label = F)) +
-  facet_wrap(~source)
+  facet_wrap(~source) +
+  theme(strip.text = element_text(face="bold"))
 
-p2 <- ggplot(trendDif) +
-  geom_sf(aes(fill = sen.slope), color = 'grey70') +
+p3 <- ggplot(trendDif %>% filter(Group == 'NLA.minus.Random')) +
+  geom_sf(aes(fill = Slope.Difference), color = 'grey30') +
   theme(axis.text.x = element_blank(),
         axis.text.y = element_blank(),
         axis.ticks = element_blank(),
         rect = element_blank(),
+        plot.margin = margin(-2,0,0, 0, 'cm'),
         panel.grid.major = element_line(color = 'transparent'),
         legend.position = 'bottom') +
-  scale_fill_gradient2(low='#a50026',mid='#abd9e9', high='#313695', 
-                       midpoint = 0, name = 'NLA minus Random\n(cm/yr)') +
-  facet_wrap(~source)+
-  ggtitle(' ')
+  scale_fill_gradient2(low='#a50026',mid='#ffffff', high='#313695', 
+                       midpoint = 0) +
+  facet_wrap(~Group)+
+  theme(strip.text = element_text(face="bold"))
 
-g <- grid.arrange(p1,p2, ncol = 2, widths = c(2,1))
+g <- grid.arrange(p1,p2, p3, layout_matrix = rbind(c(1,1,1),c(2,2,3)))
+
+
+p1 <- mk.full %>%
+  filter(source != 'In.Situ') %>%
+  left_join(region %>% st_simplify(dTolerance = 500)) %>%
+  rowwise() %>%
+  mutate(coords.x = st_point_on_surface(geometry)[1],
+    coords.y = st_point_on_surface(geometry)[2]) %>%
+  ungroup() %>%
+  ggplot() +
+    geom_sf(aes(fill = sen.slope), color = 'grey30') +
+    geom_text(aes(x = coords.x, y = coords.y, label = sig), size = 4, color = 'black') +
+    theme(axis.text.x = element_blank(),
+          axis.text.y = element_blank(),
+          axis.ticks = element_blank(),
+          rect = element_blank(),
+          panel.grid.major = element_line(color = 'transparent'),
+          legend.position = 'top',
+          plot.margin = margin(-2,0,-2, 0, 'cm')) +
+    scale_fill_viridis_c(option = 'plasma', start = .2) +
+    #scale_fill_gradient2(low='#F56217', high='#0B486B') +
+    labs(fill = 'Slope (cm/year)', x = '', y = '') +
+    guides(color = guide_legend(label = F)) +
+  facet_wrap(~source) +
+  theme(strip.text = element_text(face="bold"))
+
+p2 <- ggplot(trendDif) +
+  geom_sf(aes(fill = Slope.Difference), color = 'grey30') +
+  theme(axis.text.x = element_blank(),
+        axis.text.y = element_blank(),
+        axis.ticks = element_blank(),
+        rect = element_blank(),
+        plot.margin = margin(-2,0,0, 0, 'cm'),
+        panel.grid.major = element_line(color = 'transparent'),
+        legend.position = 'right') +
+  scale_fill_gradient2(low='#a50026',mid='#ffffff', high='#313695', 
+                       midpoint = 0) +
+  facet_wrap(~Group)+
+  theme(strip.text = element_text(face="bold"))
+
+g <- grid.arrange(p1,p2, nrow = 2)
 
 ggsave('figures/SampleComps.png', plot = g, width = 7.5, height = 4)
 
@@ -331,14 +383,25 @@ ggsave('figures/SampleComps.png', plot = g, width = 7.5, height = 4)
 ## Individual lake analysis
 
 ```{r}
+summ.meds.full <- read_feather(paste0('out/TS_Preds/NLA2012_cntr_',iteration,'.feather')) %>% mutate(sample = 'NLA') %>%
+  bind_rows(read_feather(paste0('out/TS_Preds/Over10_',iteration,'.feather')) %>% mutate(sample = 'Over10')) %>%
+  filter(month %in% c(5:9),
+  year < 2019) %>% ##Incomplete obs for 2019 so we won't use it.
+  group_by(COMID, year, region) %>%
+  summarise(secchi.med = median(value))
+
+lake.join <- read_feather('out/NLA2012LakesFull.feather') %>%
+  bind_rows(read_feather('out/Over10LakesFull.feather')) %>%
+  distinct()
+
 #For individual lake analysis use stricter filter for total years with observations
-counts <- summ.meds %>%
+counts <- summ.meds.full %>%
   group_by(COMID, region) %>%
   summarise(count = n()) %>%
   filter(count > 25)
 
 ##Calculate mann-Kendall statistics for each lake.
-mk <- summ.meds %>% filter(COMID %in% counts$COMID) %>% 
+mk <- summ.meds.full %>% filter(COMID %in% counts$COMID) %>% 
   group_by(COMID, region) %>%
   arrange(year) %>%
   nest() %>%
@@ -349,15 +412,31 @@ mk <- summ.meds %>% filter(COMID %in% counts$COMID) %>%
          sig = ifelse(p.value < .1, T, F)) %>%
   select(COMID, region, sen.slope, p.value, sig) %>%
   left_join(lake.join) %>%
-  mutate(sizeQuant = cut(areasqkm, breaks = c(0,.5,1,10,1000)))
+  mutate(Size.Group = cut(areasqkm, breaks = c(0,1,10,100,2000), labels = c('<1','1-10', '10-100', '>100')))
 
-ggplot(mk, aes(x = sen.slope)) + geom_histogram() + facet_wrap(~region, scales = 'free') + theme_bw() + ggtitle('Distribution of Lake Trends by Region')
+mk.ave <- mk %>% group_by(Size.Group) %>% summarise(mean =mean(sen.slope), median = median(sen.slope), sd = sd(sen.slope), lower90 = mean - sd, upper90 = mean + sd)
 
-mk %>% st_as_sf(., coords = c('long','lat'), crs = 4326) %>% st_transform(st_crs(region)) %>%
+ggplot(mk, aes(x = sen.slope)) + geom_density(aes(fill = Size.Group), alpha = .4) + scale_fill_viridis_d(end = .8) + theme_bw() + ggtitle('Distribution of Lake Trends by Size Class') + geom_vline(data = mk.ave, aes(xintercept = mean, color = Size.Group)) + scale_color_viridis_d(end = .9) + coord_cartesian(xlim = c(-5,5))
+
+t.test(mk$sen.slope[mk$Size.Group == '<10'], mk$sen.slope[mk$Size.Group == '10-100'])
+t.test(mk$sen.slope[mk$Size.Group == '10-100'], mk$sen.slope[mk$Size.Group == '>100'])
+t.test(mk$sen.slope[mk$Size.Group == '<10'], mk$sen.slope[mk$Size.Group == '>100'])
+t.test(mk$sen.slope[mk$Size.Group == '>100'])
+t.test(mk$sen.slope[mk$Size.Group == '10-100'])
+t.test(mk$sen.slope[mk$Size.Group == '<10'])
+
+mk %>% group_by(Size.Group) %>% summarise(mean =mean(sen.slope), median = median(sen.slope))
+
+ggplot(mk, aes(x = areasqkm, y = sen.slope)) + geom_point() + scale_x_log10()
+
+ggplot(mk, aes(sizeQuant, sen.slope)) + geom_violin(trim = F) + theme_bw() + ggtitle('Distribution of Lake Trends by Region') + stat_summary(fun.data=mean_sdl, mult=1, geom="pointrange", color="red")#+ geom_boxplot(width=0.5)
+
+
+mk %>% filter(!is.na(lat), areasqkm > 10) %>%st_as_sf(., coords = c('long','lat'), crs = 4326) %>% st_transform(st_crs(region)) %>%
   ggplot(.) +   geom_sf(data = region) + geom_sf(aes(color = sen.slope, alpha = sig)) +
-  scale_color_viridis_c() +
+  scale_color_gradient2(low='#a50026',mid='#ffffff', high='#313695', 
+                       midpoint = 0) +
   scale_alpha_discrete(breaks = c(T,F), limits = c(1,.3), labels = c('True', 'False'))
-
 ```
 
 

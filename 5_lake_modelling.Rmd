@@ -7,33 +7,6 @@ editor_options:
   chunk_output_type: console
 ---
 
-```{r setup, eval = F}
-library(googledrive)
-library(tidyverse)
-library(feather)
-library(viridis)
-library(knitr)
-library(sf)
-library(rgdal)
-library(maps)
-library(magrittr)
-library(rkt)
-library(xgboost)
-library(lubridate)
-library(hydrolinks)
-library(lubridate)
-library(onehot)
-library(broom)
-library(furrr)
-library(plotly)
-library(corrgram)
-library(stlplus)
-library(gganimate)
-library(boot)
-library(trend)
-```
-
-
 ## Connect all of the lake info to LakeCat to get model inputs
 
 ```{r, eval = F}

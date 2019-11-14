@@ -10,18 +10,6 @@ editor_options:
 
 This script pulls down all the cloud free reflectance data available for a ranomd sample of 1000 nhd lakes.
 
-```{r setup, include=FALSE}
-library(tidyverse)
-library(feather)
-library(reticulate)
-library(googledrive)
-library(sf)
-library(mapview)
-library(hydrolinks)
-library(furrr)
-```
-
-
 
 ```{r}
 ## Load in nhd lake data downlowded from, http://www.horizon-systems.com/NHDPlus/V2NationalData.php

@@ -9,23 +9,6 @@ editor_options:
 
 # This script takes the downloaded reflectance data from Google Earth Engine and joins it back up with the original water quality information as well as lake, catchement, and watershed data from NHDPlusV2 and LakeCat.
 
-```{r setup, eval = F}
-library(tidyverse)
-library(feather)
-library(viridis)
-library(knitr)
-library(sf)
-library(rgdal)
-library(magrittr)
-library(mlbench)
-library(caret)
-library(doParallel)
-library(furrr)
-library(kableExtra)
-library(dataRetrieval)
-library(lubridate)
-```
-
 ## Load in the downloaded data from AquaSat
 
 ```{r}

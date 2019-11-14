@@ -8,29 +8,6 @@ editor_options:
 ---
 # This script takes the munged optical and landscape data and runs it through various feature selection algorithms to determine the inputs for the final models.
 
-```{r setup, eval = F}
-library(tidyverse)
-library(feather)
-library(viridis)
-library(knitr)
-library(sf)
-library(rgdal)
-library(maps)
-library(magrittr)
-library(mlbench)
-library(caret)
-library(doParallel)
-library(furrr)
-library(lubridate)
-library(groupdata2)
-library(CAST)
-library(mapview)
-library(onehot)
-library(Metrics)
-library(kableExtra)
-library(ggpmisc)
-```
-
 
 ```{r Eval}
 evals <- output %>%
@@ -198,6 +175,22 @@ fieldmatch.coin <- output.full %>%
   summarise(mean = mean(value))
 
 
+fieldmatch.coin %>%
+  spread(Measure, mean) %>%
+  ggplot(.,aes(x = In.Situ, y = Modelled)) + 
+  #geom_hex(aes(fill = ..count..)) + 
+  geom_point() + 
+  scale_fill_viridis(name = 'Point\nCount', trans = 'log10') + 
+  geom_abline(color = 'red') + 
+  stat_poly_eq(aes(label =  paste(stat(adj.rr.label))),
+               formula = y~x, parse = TRUE, 
+               label.y = Inf, vjust = 1.3) +
+  #scale_x_continuous(trans = 'log10', labels = scales::comma) +
+  #scale_y_continuous(trans = 'log10', labels = scales::comma) +
+  #coord_equal(ratio = 1) +
+  labs(title = 'Hold-Out Validation', subtitle = 'Red line is 1:1', x = 'Actual', y = 'Predicted')
+
+
 ggplot(fieldmatch.coin, aes(x = year, y = mean, color = Measure)) + 
   #geom_point(alpha = .1) +
   geom_line() + 
@@ -207,6 +200,18 @@ ggplot(fieldmatch.coin, aes(x = year, y = mean, color = Measure)) +
   theme_bw() +
   theme(legend.position = 'bottom')
 
+evals.aggregated <- fieldmatch.coin %>%
+  spread(Measure, mean) %>%
+  ungroup() %>%
+  summarise(rmse = rmse(In.Situ, Modelled),
+            mae = mae(In.Situ, Modelled),
+            mape = mape(In.Situ, Modelled),
+            bias = bias(In.Situ, Modelled),
+            p.bias = percent_bias(In.Situ, Modelled),
+            smape = smape(In.Situ, Modelled)) %>%
+  mutate(iteration = iteration)
+
+evals.aggregated %>% kable(digits = 2) %>% kable_styling() %>% scroll_box(width = '4in')
 
 ## Next do it with all the field data we got.  
 # We add the additional step of averaging per lake before per month because sampling is really uneven. 

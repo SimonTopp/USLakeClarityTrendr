@@ -5,28 +5,6 @@ date: "11/8/2019"
 output: html_document
 ---
 
-```{r setup, eval = F}
-library(tidyverse)
-library(feather)
-library(viridis)
-library(knitr)
-library(sf)
-library(rgdal)
-library(maps)
-library(magrittr)
-library(mlbench)
-library(caret)
-library(doParallel)
-library(furrr)
-library(lubridate)
-library(groupdata2)
-library(CAST)
-library(mapview)
-library(onehot)
-library(Metrics)
-library(kableExtra)
-library(ggpmisc)
-```
 
 #Attempt at FFS Using xgboost and spatial cross validation.
 
@@ -58,45 +36,7 @@ library(ggpmisc)
 #   ungroup()
 
 
-srMunged <- read_feather('out/srMunged.feather') %>%
-  filter(parameter == 'secchi',
-         value <= 10,
-         !is.na(CatAreaSqKm)) %>% #100 obs that didn't match up with LakeCat
-  mutate(COMID = as.character(COMID),
-         pctForest2006 = PctDecid2006Cat + PctConif2006Cat + PctMxFst2006Cat,
-         pctUrban2006 = PctUrbMd2006Cat + PctUrbHi2006Cat,
-         pctWetland2006 = PctWdWet2006Cat + PctHbWet2006Cat,
-         areasqkm = round(areasqkm, 1),
-         meandused = round(meandused, 1),
-         inStreamCat = as.numeric(inStreamCat),
-         sat = factor(sat, levels = c(5,7,8), labels = c('l5', 'l7', 'l8'))) 
-  
-refCorrect <- srMunged %>% select(UniqueID, blue, green, red, nir, sat) %>%
-  gather(blue:nir, key = 'band' , value = 'value') %>%
-  spread(sat, value) %>%
-  group_by(band) %>%
-  nest() %>%
-  left_join(funcs.8) %>% #From 1_nhd_join_and_munge
-  left_join(funcs.5) %>%
-  mutate(pred8 = map2(lm8, data, predict),
-         pred5 = map2(lm5, data, predict)) %>%
-  select(-c(lm8,lm5)) %>%
-  unnest(data, pred8, pred5) %>%
-  select(-c(l8,l5)) %>%
-  rename(l8 = pred8, l5 = pred5) %>% gather(l5,l7,l8, key = 'sat', value = 'value') %>%
-  spread(band, value) %>%
-  na.omit()
-  
-srMunged <- srMunged %>% select(-c(blue, green, red, nir, sat)) %>% left_join(refCorrect) %>%
-  mutate(NR = nir/red,
-         BG = blue/green,
-         dWL = fui.hue(red, green, blue))
 
-srMunged[srMunged == -9998] = NA ##Standardize missing values
-##See if removing the ~2k obs with missing depth helps, it doesn't
-#srMunged <- srMunged %>% filter(!is.na(meandused))
-
-if(log == T){srMunged <- srMunged %>% mutate(value = log(value))}
 
 ## Select parameters to go into model
 paste0(names(srMunged), collapse = ', ')
