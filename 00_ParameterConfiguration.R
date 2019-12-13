@@ -32,6 +32,7 @@ library(boot)
 library(trend)
 library(scales)
 library(gridExtra)
+library(Hmisc)
 
 #Parameters
 iteration = 'FFS_PolyCorr_noLn_Secchi'
@@ -131,4 +132,5 @@ if(stage > 4){
 
 if(stage > 5){
   Preds.out <- read_feather(paste0('out/TS_Preds/', lakeSamp, '_',iteration,'.feather'))
+  bootstrapped.ts <- read_feather(paste0('out/TS_Preds/',lakeSamp,'_bootstrapped.feather'))
 }

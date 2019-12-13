@@ -448,7 +448,7 @@ refCompPre <- purrr::map_dfr(files, read.csv, stringsAsFactors = F) %>%
   mutate(dWL = fui.hue(red, green, blue),
          date = ymd_hms(date),
          year = year(date),
-         sat =  sat = factor(sat, levels = c(5,7,8), labels = c('l5','l7','l8')),
+         sat = factor(sat, levels = c(5,7,8), labels = c('l5','l7','l8')),
          source = 'NLA') %>%
   select(year, blue, red, green, nir, dWL, sat, source, COMID)
 
@@ -572,27 +572,59 @@ lm5 <- function(band, x){
 
 
 ##Check out the resulting corrections a little
-band = 'green'
-sat = 'l8'
-x <- refCompPre %>% filter(source == 'NLA', year > 2012)
-max.x <- max(x[,band])
-df <- tibble(y = quantile(x %>% filter(sat == 'l7') %>% .[,band], 
-                             seq(.01,.99, .01)), 
-             x = quantile(x %>% filter(sat == 'l8') %>% .[,band], 
-                             seq(.01,.99, .01)))
-lm <- lm(y~poly(x, 2), data = df)
-df <- df %>% bind_cols(corrected = lm$fitted.values) %>%
-  gather(x, corrected, key = 'source', value = x) %>%
-  mutate(source = ifelse(source == 'x', 'original', source))
+## Function for plotting up the resutls
+correctionPlot <- function(band, sat){
+  if(sat == 'l8'){
+    x <- refCompPre %>% filter(source == 'NLA', year > 2012)
+    }else if(sat == 'l5'){
+      x <- refCompPre %>% filter(source == 'NLA', year > 1999, year < 2012)
+    }
+  max.x <- max(x[,band])
+  df <- tibble(y = quantile(x %>% filter(sat == 'l7') %>% .[,band], 
+                               seq(.01,.99, .01)), 
+               x = quantile(x %>% filter(sat == sat) %>% .[,band], 
+                               seq(.01,.99, .01)))
+  lm <- lm(y~poly(x, 2), data = df)
+  r2 <- summary(lm)$adj.r.squared %>% round(4)
+  
+  df <- df %>% bind_cols(Corrected = lm$fitted.values) %>%
+    gather(x, Corrected, key = 'Reflectance', value = x) %>%
+    mutate(Reflectance = ifelse(Reflectance == 'x', 'Original', Reflectance))
+  
+  
+  ggplot(df, aes(x = x, y = y, color = Reflectance)) + geom_point(alpha = .5) + 
+    geom_abline(color = 'red') + 
+    annotate('text', label = paste0("italic(R)^2 ==", r2), parse = T, x = -Inf, y = Inf, vjust = 1.2, hjust = -.2) +
+    scale_color_viridis_d(begin = .2, end = .8) +
+    theme_bw() +
+    #scale_y_continuous(sec.axis = sec_axis(~.*(100/max.x), name = 'Quantile')) + 
+    #labs(x = paste0(capitalize(sat), " SR"), y = 'L7 SR', title = paste0(capitalize(sat),' ', capitalize(band), " Correction")) +
+    labs(title = paste0(capitalize(band))) +
+    theme(legend.position = 'none')#,
+          #axis.title = element_blank())
+}
 
-ggplot(df, aes(x = x, y = y, color = source)) + geom_point() + geom_abline(color = 'red') + scale_y_continuous(sec.axis = sec_axis(~.*(100/1500), name = 'quantile')) + labs(x = 'L8', y = 'l7', title = 'Polynomial Correction Example')
+p1 <- correctionPlot('blue', 'l5')
+p2 <- correctionPlot('green', 'l5')
+p3 <- correctionPlot('red', 'l5')
+p4 <- correctionPlot('nir', 'l5')
+p5 <- correctionPlot('blue', 'l8')
+p6 <- correctionPlot('green', 'l8')
+p7 <- correctionPlot('red', 'l8')
+p8 <- correctionPlot('nir', 'l8')
 
-df <- df %>% bind_cols(corrected = funcs.8$lm8[funcs.8$band == band][[1]]$fitted.values) %>%
-  gather(x, corrected, key = 'source', value = x)
+legend <-  cowplot::get_legend(p1 + theme(legend.position = 'bottom')) 
+g1 <- arrangeGrob(p1,p2,p3,p4, nrow = 2, bottom = 'L5 Surface Reflectance')
+g2 <- arrangeGrob(p5,p6,p7,p8, nrow = 2, bottom = 'L8 Surface Reflectance')
 
+g <- grid.arrange(g1,g2, nrow = 2, left = "L7 Surface Reflectance", top = legend)
+ggsave('figures/CorrectionPlots.png', plot = g, height = 8, width = 4, units = 'in')
 
+## Example for AGU talk
+correctionPlot('nir', 'l8') + labs(x = 'Landsat 8 NIR Reflectance', y = 'Landsat 7 NIR Reflectance', title = 'Reflectance Correction Procedure') + theme(legend.position = c(.8, .2))
+ggsave('figures/NirCorrExample.png', height = 4, width = 4, units = 'in')
 ## Generate functions
-bands <- tibble(band = c('blue', 'green', 'nir', 'red'))
+bands <- tibble(band = c('blue', 'green', 'nir', 'red')) 
 funcs.8 <- bands %>%
   mutate(lm8 = purrr::map(band, lm8, x = refCompPre))
 funcs.5 <- bands %>%

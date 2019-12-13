@@ -174,8 +174,19 @@ fieldmatch.coin <- output.full %>%
   group_by(year, Measure, region) %>%
   summarise(mean = mean(value))
 
+p1 <- ggplot(output, aes(x = Actual, y = Predicted)) + 
+  geom_hex(aes(fill = ..count..)) + 
+  scale_fill_viridis(name = 'Point\nCount', trans = 'log10') + 
+  geom_abline(color = 'red') + 
+  stat_poly_eq(aes(label =  paste(stat(adj.rr.label))),
+               formula = y~x, parse = TRUE, 
+               label.y = Inf, vjust = 1.3) +
+  #scale_x_continuous(trans = 'log10', labels = scales::comma) +
+  #scale_y_continuous(trans = 'log10', labels = scales::comma) +
+  #coord_equal(ratio = 1) +
+  labs(title = 'Observation Level Validation', x = 'Actual', y = 'Predicted')
 
-fieldmatch.coin %>%
+p2 <- fieldmatch.coin %>%
   spread(Measure, mean) %>%
   ggplot(.,aes(x = In.Situ, y = Modelled)) + 
   #geom_hex(aes(fill = ..count..)) + 
@@ -188,17 +199,25 @@ fieldmatch.coin %>%
   #scale_x_continuous(trans = 'log10', labels = scales::comma) +
   #scale_y_continuous(trans = 'log10', labels = scales::comma) +
   #coord_equal(ratio = 1) +
-  labs(title = 'Hold-Out Validation', subtitle = 'Red line is 1:1', x = 'Actual', y = 'Predicted')
+  labs(title = 'Aggregated Validation', x = 'Actual', y = 'Predicted')
 
 
-ggplot(fieldmatch.coin, aes(x = year, y = mean, color = Measure)) + 
+p3 <- ggplot(fieldmatch.coin, aes(x = year, y = mean, color = Measure)) + 
   #geom_point(alpha = .1) +
   geom_line() + 
-  scale_color_viridis_d(end = .6) +
+  scale_color_viridis_d(end = .6, labels = c('Actual', 'Predicted')) +
   facet_wrap(~region, scales = 'free', ncol = 2) +
-  labs(title = 'Smoothed SDD Trends By Region Using Coincident Testing Data') +
+  labs(title = 'Timeseries Using Coincident Hold-Out Data',
+       x = 'Year', y = 'Mean Summer Clarity (m)') +
   theme_bw() +
-  theme(legend.position = 'bottom')
+  theme(legend.position = c(.7,.1),
+        legend.direction = 'horizontal')
+
+
+layout <- rbind(c(1,2),c(3,3),c(3,3))
+g <- grid.arrange(p1,p2, p3, layout_matrix = layout)
+
+ggsave('figures/HoldOutValidation.png', plot = g, width = 6.5, height = 8, units = 'in')
 
 evals.aggregated <- fieldmatch.coin %>%
   spread(Measure, mean) %>%
@@ -213,6 +232,10 @@ evals.aggregated <- fieldmatch.coin %>%
 
 evals.aggregated %>% kable(digits = 2) %>% kable_styling() %>% scroll_box(width = '4in')
 
+evals %>% select(mae, mape, bias) %>% mutate(Validation = 'Point.Based') %>% bind_rows(evals.aggregated %>% select(mae, mape, bias) %>% mutate(Validation = 'Aggregated')) %>%
+  mutate_if(is.numeric, round, 3) %>%
+  kable() %>%
+  kable_styling()
 ## Next do it with all the field data we got.  
 # We add the additional step of averaging per lake before per month because sampling is really uneven. 
 # Load in lagos and wqp data
