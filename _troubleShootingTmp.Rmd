@@ -691,7 +691,7 @@ PinoCors <- function(x){
   cor(x$value, x$AOD)
 }
 
-srMunged %>%
+AODCors <- srMunged %>%
   filter(parameter == 'secchi') %>%
   mutate(mtPino = ifelse(year %in% c(1992,1993), '92-93', 'other'),
          BR = blue/red, 
@@ -704,7 +704,10 @@ srMunged %>%
          r.92_93 = purrr::map_dbl(data, PinoCors)) %>%
   select(-data) %>%
   mutate(r.full = round(r.full, 4),
-         r.92_93 = round(r.92_93, 4)) %>%
+         r.92_93 = round(r.92_93, 4))
+
+AODCors %>%
+  rename(Band.or.Ratio = Band, Cor.Full.Data = r.full, Cor.92_92 = r.92_93) %>%
   kable() %>%
   kable_styling()
 
@@ -853,3 +856,101 @@ check <- ref.summs %>%
   mutate(cor = purrr::map(data, ~cor(.$meandused), .$lakeDiff, use = 'complete.obs')))
 g
 ```
+
+## Real quick check the average size of lagos lakes
+
+```{r}
+library(LAGOSNE)
+
+lagos <- lagosne_load()
+names(lagos$lakes.geo)
+names(lagos$secchi)
+
+
+```
+
+
+```{r}
+## Pull FL preds for Matt.
+
+Preds <- read_feather(paste0('out/TS_Preds/NLA2012_cntr_',iteration,'.feather')) %>% mutate(sample = 'NLA') %>%
+  bind_rows(read_feather(paste0('out/TS_Preds/Over10_',iteration,'.feather')) %>% mutate(sample = 'Over10')) %>%
+  bind_rows(read_feather(paste0('out/TS_Preds/EcoReg2000_cntr_',iteration,'.feather')) %>%
+              mutate(sample = 'Random'))
+
+ids <- Preds %>% distinct(COMID)
+
+FL = maps::map('state', region = 'florida', fill = T) %>% st_as_sf(.)
+FL = rnaturalearth::ne_states(country = 'united states of america') %>% st_as_sf() %>%filter(name == 'Florida')
+
+mapview(FL)
+
+nhdLakes <- st_read('D:/GIS_Data/NHD/nhdPlusV2_WaterBodiesFull.shp') %>%
+  filter(COMID %in% ids$COMID)
+
+fl.lakes <- nhdLakes %>%
+  st_transform(st_crs(FL)) %>%
+  st_intersection(., FL) %>%
+  select(-c(featurecla:ne_id)) %>%
+  mutate(COMID = as.character(COMID)) %>%
+  left_join(Preds) %>%
+  filter(!is.na(value))
+
+files <- c(list.files('lake_data/EcoReg2000_cntr', full.names = T), list.files('lake_data/NLA2012_cntr', full.names = T), list.files('lake_data/Over10', full.names = T))
+
+
+ref <- files %>%
+  purrr::map_dfr(read.csv, stringsAsFactors = F) %>%
+  mutate(COMID = as.character(COMID)) %>%
+  filter(!is.na(blue),
+         COMID %in% ids$COMID) %>%
+  distinct() %>%
+  filter(pixelCount > 5, cScore < .1, hillshadow == 1)
+
+fl.lakes <- fl.lakes %>%
+  left_join(ref)
+
+save(fl.lakes, file = 'out/tmp/fl.Lakes.RData')
+
+rm(fl.lakes)
+load('out/tmp/fl.Lakes.RData')
+
+write_feather(fl.lakes, )
+
+mapView(fl.lakes)
+
+samp <- unique(fl.lakes$COMID) %>%
+  sample(10)
+
+fl.lakes %>% 
+  filter(COMID %in% samp) %>%
+  ggplot(., aes(x = ymd_hms(date), y = value)) + geom_point() + facet_wrap(~COMID, scales = 'free')
+
+
+```
+
+
+```{r}
+##Quickie de-trended correlation test
+nla <- meanFull %>% filter(source == 'NLA')
+
+deTrend <- function(x){
+  lm <- lm(mean~year, data = x)
+  deTrended <- x$mean - lm$fitted.values
+  return(deTrended)
+}
+
+deTrended <- nla %>%
+  group_by(region) %>%
+  nest() %>%
+  mutate(deTrended = purrr::map(data, deTrend)) %>%
+  unnest() %>%
+  select(region, year, deTrended) %>%
+  spread(key = region, value = deTrended)
+  
+corrgram(deTrended, order = T)
+corrplot::corrplot.mixed(cor(deTrended %>% select(-year)))
+
+```
+
+

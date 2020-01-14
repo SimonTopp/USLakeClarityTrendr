@@ -104,7 +104,7 @@ mae(check$NLA, check$Landsat)
 ## Take a quick look at mean trends in each HUC2
 
 #How many lakes failed? The way the code is written we'll have 1 row of NA's for each lake that failed
-colSums(is.na(Preds.out)) ##302 out of ~2.5k, not bad, in spot checking this is a landsat visible issue.
+colSums(is.na(Preds.out)) ##302 out of ~2.5k for NLA 2012 lakes, not bad, in spot checking this is a landsat visible issue.  Much worse for Random Sample, 4,638
 
 ##Look at summer median values
 Preds.out%>%
@@ -137,7 +137,7 @@ counts <- summ.meds %>%
 summ.meds %>%
   filter(!is.na(value)) %>%
   group_by(COMID, year) %>%
-  summarise(dataFrac = n()/2270) %>%
+  summarise(dataFrac = n()/13060) %>% ## or 13060 for random, 2270 for NLA
   ggplot(., aes(x = year, y = dataFrac)) + geom_col()
 
 ####  Create wide dataset 
@@ -240,7 +240,7 @@ nla.situ.cor <- meanFull %>% select(year,region, mean, source) %>% spread(source
          sig = ifelse(p.value < .01, '***', ifelse(p.value < .05, '**', ifelse(p.value < 0.1, '*', NA))))
 
 
-colors = cividis(9, begin = .1, end = .9, direction = -1)
+colors = viridis(9, direction = -1)
 
 p1 <- meanFull %>%
   filter(year < 2019, year > 1984) %>%
@@ -269,7 +269,7 @@ k <- k+1
 }
 grid::grid.draw(g)
 
-ggsave('figures/NLA_TS_Comp.png', width = 5, height = 4.5, plot = g)
+ggsave('figures/NLA_TS_Comp.pdf', width = 5, height = 4.5, plot = g)
 
 FieldMK <- fieldMean %>%
   group_by(region) %>%
@@ -313,9 +313,15 @@ trendDif <- mk.full %>%
   mutate(sig = NA, p.value = NA, source = 'Difference') %>%
   left_join(region %>% st_simplify(dTolerance = 500))
 
+lakeIDs <- read_feather(paste0('out/TS_Preds/NLA2012_cntr_',iteration,'.feather')) %>%
+  na.omit() %>% 
+  distinct(COMID) %>%
+  bind_rows(read_feather(paste0('out/TS_Preds/EcoReg2000_cntr_',iteration,'.feather')) %>%
+              na.omit() %>% 
+              distinct(COMID))
 
 p2 <- ggplot(region %>% st_simplify(dTolerance = 500)) + geom_sf(aes(fill = region)) + 
-  geom_sf(data = lakes, size = .2, color = 'black', alpha = .4) + 
+  geom_sf(data = lakes %>% filter(COMID %in% lakeIDs$COMID), size = .2, color = 'black', alpha = .4) + 
   theme(axis.text.x = element_blank(),
           axis.text.y = element_blank(),
           axis.ticks = element_blank(),
@@ -324,7 +330,7 @@ p2 <- ggplot(region %>% st_simplify(dTolerance = 500)) + geom_sf(aes(fill = regi
           plot.margin = margin(-2,0,-2, 0, 'cm'),
         strip.text = element_text(face = 'bold'),
         legend.position = 'none') +
-  scale_fill_viridis_d(option = 'cividis', name = "Region", end = .9, begin = .1) + 
+  scale_fill_viridis_d(name = "Region") + 
   facet_wrap(~sample)
 
 ggsave('figures/SamplePointMaps.png', height = 3, width = 6, plot = p2)
@@ -483,6 +489,27 @@ wilcox.test(mk$sen.slope[mk$Size.Group == '>100'], conf.int = T)
 wilcox.test(mk$sen.slope[mk$Size.Group == '10-100'],conf.int = T)
 wilcox.test(mk$sen.slope[mk$Size.Group == '<10'],conf.int = T)
 
+##Try to make a heatmap of all the lakes
+samp <- sample(unique(summ.meds.full$COMID), 1000)
+
+summ.meds.full %>% 
+  filter(COMID %in% samp) %>%
+  left_join(mk %>% select(COMID, sen.slope, sig)) %>%
+  filter(sig == T) %>%
+  arrange(sen.slope) %>%
+  ggplot(.) +
+  geom_tile(aes(x = COMID, y = year, fill = secchi.med)) + 
+  geom_point(aes(x = COMID, y = 2020, color = sen.slope)) +
+  scale_fill_viridis_c(trans = 'log10')
+
+## Just plot up the significant trends of individual lakes ot look at nation wide patterns!
+mk %>%
+  filter(sig == T) %>%
+  st_as_sf(., coords = c('long', 'lat'), crs = 4326) %>%
+  ggplot() +
+  geom_sf(region %>% st_simplify(dTolerance = 1000)) +
+  geom_sf(., aes(color = sen.slope))
+  
 
 
 mk %>% group_by(Size.Group) %>% summarise(mean =mean(sen.slope), median = median(sen.slope))
@@ -493,7 +520,7 @@ ggplot(mk, aes(sizeQuant, sen.slope)) + geom_violin(trim = F) + theme_bw() + ggt
 
 
 mk %>% filter(!is.na(lat), areasqkm > 10) %>%st_as_sf(., coords = c('long','lat'), crs = 4326) %>% st_transform(st_crs(region)) %>%
-  ggplot(.) +   geom_sf(data = region) + geom_sf(aes(color = sen.slope, alpha = sig)) +
+  ggplot(.) + geom_sf(data = region) + geom_sf(aes(color = sen.slope, alpha = sig)) +
   scale_color_gradient2(low='#a50026',mid='#ffffff', high='#313695', 
                        midpoint = 0) +
   scale_alpha_discrete(breaks = c(T,F), limits = c(1,.3), labels = c('True', 'False'))
@@ -593,8 +620,31 @@ ggplot() +
 
 ```{r}
 ###
-p1 <- bootstrapped.ts %>% group_by(region) %>% mutate(p.dif = ((mean/lag(mean))-1)*100)%>%
-  ungroup() %>%
+p.dif <- bootstrapped.ts %>% group_by(region) %>% mutate(p.dif = ((mean/lag(mean))-1)*100)%>%
+  ungroup()
+
+##Look at correlations with percent change
+p.dif.cor <- p.dif %>%  
+  select(region, year, p.dif) %>%
+  spread(key = region, value = p.dif) %>%
+  filter(year > 1984) %>%
+  select(-year) %>%
+  cor(.)
+
+corrplot::corrplot.mixed(p.dif.cor)
+
+p.values <- p.dif %>%  
+  select(region, year, p.dif) %>%
+  spread(key = region, value = p.dif) %>%
+  filter(year > 1984) %>%
+  select(-year) %>%
+  corrplot::cor.mtest(.)
+
+corrplot::corrplot(p.dif.cor, p.mat = p.values$p, insig = "label_sig",
+         sig.level = c(.01, .05, .1), pch.cex = .9, pch.col = "red", type = 'upper', order = 'hclust', method = 'color')
+
+
+p1 <- p.dif %>%
   ggplot(.,aes(x = region, y = p.dif)) + geom_violin(aes(fill = region)) + 
   geom_boxplot(width=0.1, color = 'grey80', fill = 'grey60') + 
   scale_fill_viridis_d(option = 'cividis', begin = .1, end = .9) +
