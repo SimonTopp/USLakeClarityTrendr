@@ -43,11 +43,11 @@ lake.join <- lake.join %>%
             ##Dam info acts as identifiers and are redundant with lake_type/area
             'Precip08Cat', 'Precip09Cat', 'Tmean08Cat', 'Tmean09Cat'))
             #Use long term averages not these
-#Round the majority of values to the nearest 1 to avoid variables become 'unique ID's)
+#Round the majority of values to the nearest 1 to avoid variables becoming 'unique ID's)
 round1 <- names(lake.join %>% select(c(CatAreaSqKm:CatPctFull,PctImp2006Cat, PctCarbResidCat:WetIndexCat)))
 
 ## Round a few to 10 because they're variation is real big and larger values with 
-#Round a subset to the nearest 10th because there values more or less range from 0 to 1.
+#Round a subset to the nearest 10th because their values more or less range from 0 to 1.
 round.1 <- names(lake.join %>% select(c(AgKffactCat, KffactCat, MineDensCat)))
 
 lake.join <- lake.join %>%

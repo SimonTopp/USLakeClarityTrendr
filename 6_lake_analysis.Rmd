@@ -231,6 +231,7 @@ nla.rand.cor <- meanFull %>% select(year,region, mean, source) %>% spread(source
   mutate(NLA.Random.Corr = purrr::map(data, ~cor.test(.$NLA, .$Random)),
          cor = purrr::map_dbl(NLA.Random.Corr, 'estimate'),
          p.value = purrr::map_dbl(NLA.Random.Corr, 'p.value'))
+
 nla.situ.cor <- meanFull %>% select(year,region, mean, source) %>% spread(source, mean) %>%
   group_by(region) %>%
   nest() %>%
@@ -239,6 +240,8 @@ nla.situ.cor <- meanFull %>% select(year,region, mean, source) %>% spread(source
          p.value = purrr::map_dbl(NLA.Random.Corr, 'p.value'),
          sig = ifelse(p.value < .01, '***', ifelse(p.value < .05, '**', ifelse(p.value < 0.1, '*', NA))))
 
+
+##Check for differences between NLA and random.
 
 colors = viridis(9, direction = -1)
 
@@ -343,10 +346,10 @@ p2 <- mk.full %>%
   rowwise() %>%
   mutate(coords.x = st_point_on_surface(geometry)[1],
     coords.y = st_point_on_surface(geometry)[2]) %>%
-  ungroup() %>%
+  #ungroup() %>%
   ggplot() +
-    geom_sf(aes(fill = sen.slope), color = 'grey30') +
-    geom_text(aes(x = coords.x, y = coords.y, label = sig), size = 4, color = 'black') +
+    geom_sf(aes(fill = sen.slope, geometry = geometry), color = 'grey30') +
+    geom_text(aes(x = coords.x, y = coords.y, label = sig), size = 4, color = 'red') +
     theme(axis.text.x = element_blank(),
           axis.text.y = element_blank(),
           axis.ticks = element_blank(),
@@ -354,8 +357,8 @@ p2 <- mk.full %>%
           panel.grid.major = element_line(color = 'transparent'),
           legend.position = 'top',
           plot.margin = margin(-1,0,-1, 0, 'cm')) +
-    scale_fill_viridis_c(option = 'plasma', begin = .2, breaks = c(-.5,0,.5,1), labels = c('< -0.5', '0', '0.5',' > 1.0')) +
-    #scale_fill_gradient2(low='#F56217', high='#0B486B') +
+    #scale_fill_viridis_c(option = 'plasma', begin = .2, breaks = c(-.5,0,.5,1), labels = c('< -0.5', '0', '0.5',' > 1.0')) +
+    scale_fill_gradient2(low='#F56217', mid='#ffffff', high='#0B486B', midpoint = 0, breaks = c(-.5,0,.5,1), labels = c('< -0.5', '0', '0.5',' > 1.0')) +
     labs(fill = 'Slope (cm/year)', x = '', y = '') +
     guides(color = guide_legend(label = F)) +
   facet_wrap(~source) +
@@ -365,7 +368,7 @@ p3 <- trendDif %>% filter(Group == 'NLA.minus.Random' | Group == 'NLA.minus.In.S
   mutate(Slope.Difference = ifelse(Slope.Difference < -.5, -.5, Slope.Difference),
          Slope.Difference = ifelse(Slope.Difference > .5, .5, Slope.Difference)) %>%
   ggplot() +
-  geom_sf(aes(fill = Slope.Difference), color = 'grey30') +
+  geom_sf(aes(fill = Slope.Difference, geometry = geometry), color = 'grey30') +
   theme(axis.text.x = element_blank(),
         axis.text.y = element_blank(),
         axis.ticks = element_blank(),
@@ -380,7 +383,7 @@ p3 <- trendDif %>% filter(Group == 'NLA.minus.Random' | Group == 'NLA.minus.In.S
 
 g <- grid.arrange(p2, p3, nrow = 2)
 
-ggsave('figures/SlopeComps.png',plot = g, width = 6.5, height = 5, units = 'in')
+ggsave('figures/SlopeCompsV2.pdf',plot = g, width = 6.5, height = 5, units = 'in')
 
 g <- grid.arrange(p1,p2, p3, layout_matrix = rbind(c(1,1,1),c(2,2,3)))
 
@@ -442,10 +445,18 @@ summ.meds.full <- read_feather(paste0('out/TS_Preds/NLA2012_cntr_',iteration,'.f
   group_by(COMID, year, region) %>%
   summarise(secchi.med = median(value))
 
-lake.join <- read_feather('out/NLA2012LakesFull.feather') %>%
-  bind_rows(read_feather('out/Over10LakesFull.feather')) %>%
-  bind_rows(read_feather('out/EcoReg2000LakesFull.feather')) %>%
-  distinct()
+lake.join <- read_feather('out/NLA2012LakesFull.feather') %>% mutate(sample = 'NLA') %>%
+  bind_rows(read_feather('out/Over10LakesFull.feather') %>% mutate(sample = 'Over10')) %>%
+  bind_rows(read_feather('out/EcoReg2000LakesFull.feather') %>% mutate(sample = 'Random')) %>%
+  distinct(COMID, .keep_all = T)
+
+
+##Real Quick look at differences between the samples
+lake.join %>% filter(sample == 'NLA'|sample == 'Random', COMID %in% summ.meds.full$COMID) %>%
+  ggplot() + geom_freqpoly(aes(x = areasqkm, color = sample)) + scale_x_log10() + facet_wrap(~region)
+
+check <- lake.join %>% filter(sample == 'NLA'|sample == 'Random', COMID %in% summ.meds.full$COMID) %>%
+  group_by(sample, region) %>% summarise(meanSize = median(areasqkm)) %>% spread(sample, meanSize) %>% mutate(dif = NLA/Random)
 
 #For individual lake analysis use stricter filter for total years with observations
 counts <- summ.meds.full %>%
@@ -474,20 +485,37 @@ mk <- summ.meds.full %>%
          sig = ifelse(p.value < .1, T, F)) %>%
   select(COMID, region, sen.slope, p.value, sig) %>%
   left_join(lake.join) %>%
-  mutate(Size.Group = cut(areasqkm, breaks = c(0,10,100,2000), labels = c('<10', '10-100', '>100')))
+  mutate(Size.Group = cut(areasqkm, breaks = c(0,1,10,100,2000), labels = c('<1','1-10','10-100','>100'))) %>%
+  filter(!is.na(Size.Group))
 
-mk.ave <- mk %>% group_by(Size.Group) %>% summarise(mean =mean(sen.slope), median = median(sen.slope), sd = sd(sen.slope), lower90 = mean - sd, upper90 = mean + sd)
+mk.ave <- mk %>% group_by(Size.Group) %>% summarise(mean =mean(sen.slope), median = median(sen.slope), sd = sd(sen.slope), lower90 = mean - sd, upper90 = mean + sd, count = n())
 
 ggplot(mk, aes(x = sen.slope)) + geom_density(aes(fill = Size.Group), alpha = .4) + scale_fill_viridis_d(end = .7) + theme_bw() + labs(title = 'Distribution of Lake Trends by Size Class', x = 'Thiel-Sen Slope (cm/yr)', y = 'Density', color = 'Size Group\n(sq km)', fill = 'Size Group\n(sq km)') + geom_vline(data = mk.ave, aes(xintercept = median, color = Size.Group)) + scale_color_viridis_d(end = .9) + coord_cartesian(xlim = c(-5,5))
 
 ggsave('figures/TrendbySizeClass.png', width = 6, height = 3, units = 'in')
 
-wilcox.test(mk$sen.slope[mk$Size.Group == '<10'], mk$sen.slope[mk$Size.Group == '10-100'], conf.int = T)
+## Try another version
+ggplot(mk %>% left_join(mk.ave), aes(x = Size.Group, y = sen.slope, group = Size.Group)) + 
+  geom_hline(yintercept = 0, color = 'red') +
+  geom_violin(aes(fill = count), alpha = .6) + 
+  geom_boxplot(width = .2, fill = 'grey60', alpha = .4) +
+  scale_fill_viridis_c('Number of\nLakes', option = 'plasma', end = .8, trans = 'log10') +
+  coord_cartesian(ylim = c(-5,5))+
+  labs(x = 'Size Group (sq. km)', y = 'Slope Distribution (cm/year)') +
+  theme_bw()
+
+ggsave('figures/TrendbySizeClassViolin.png', width = 5, height = 2.5, units = 'in')
+
+
+wilcox.test(mk$sen.slope[mk$Size.Group == '<1'], mk$sen.slope[mk$Size.Group == '1-10'], conf.int = T)
+wilcox.test(mk$sen.slope[mk$Size.Group == '1-10'], mk$sen.slope[mk$Size.Group == '10-100'], conf.int = T)
 wilcox.test(mk$sen.slope[mk$Size.Group == '10-100'], mk$sen.slope[mk$Size.Group == '>100'], conf.int = T)
 wilcox.test(mk$sen.slope[mk$Size.Group == '<10'], mk$sen.slope[mk$Size.Group == '>100'], conf.int = T)
 wilcox.test(mk$sen.slope[mk$Size.Group == '>100'], conf.int = T)
 wilcox.test(mk$sen.slope[mk$Size.Group == '10-100'],conf.int = T)
-wilcox.test(mk$sen.slope[mk$Size.Group == '<10'],conf.int = T)
+wilcox.test(mk$sen.slope[mk$Size.Group == '1-10'],conf.int = T)
+wilcox.test(mk$sen.slope[mk$Size.Group == '<1'],conf.int = T)
+
 
 ##Try to make a heatmap of all the lakes
 samp <- sample(unique(summ.meds.full$COMID), 1000)
@@ -503,27 +531,18 @@ summ.meds.full %>%
   scale_fill_viridis_c(trans = 'log10')
 
 ## Just plot up the significant trends of individual lakes ot look at nation wide patterns!
-mk %>%
-  filter(sig == T) %>%
-  st_as_sf(., coords = c('long', 'lat'), crs = 4326) %>%
-  ggplot() +
-  geom_sf(region %>% st_simplify(dTolerance = 1000)) +
-  geom_sf(., aes(color = sen.slope))
-  
-
+ggplot() +
+  geom_sf(data = region %>% st_simplify(dTolerance = 1000)) +
+  geom_sf(data = mk %>%
+    filter(sig == T) %>%
+    st_as_sf(., coords = c('long', 'lat'), crs = 4326), 
+    aes(color = sen.slope)) +
+  scale_color_gradient2(low = 'red', mid = 'grey60', high = 'blue')
 
 mk %>% group_by(Size.Group) %>% summarise(mean =mean(sen.slope), median = median(sen.slope))
 
 ggplot(mk, aes(x = areasqkm, y = sen.slope)) + geom_point() + scale_x_log10()
 
-ggplot(mk, aes(sizeQuant, sen.slope)) + geom_violin(trim = F) + theme_bw() + ggtitle('Distribution of Lake Trends by Region') + stat_summary(fun.data=mean_sdl, mult=1, geom="pointrange", color="red")#+ geom_boxplot(width=0.5)
-
-
-mk %>% filter(!is.na(lat), areasqkm > 10) %>%st_as_sf(., coords = c('long','lat'), crs = 4326) %>% st_transform(st_crs(region)) %>%
-  ggplot(.) + geom_sf(data = region) + geom_sf(aes(color = sen.slope, alpha = sig)) +
-  scale_color_gradient2(low='#a50026',mid='#ffffff', high='#313695', 
-                       midpoint = 0) +
-  scale_alpha_discrete(breaks = c(T,F), limits = c(1,.3), labels = c('True', 'False'))
 
 #Look at the distribution of clarity change across in-network and out-of-network lakes
 ggplot(mk, aes(x = sen.slope)) + geom_density(alpha = .4, aes(fill = factor(inStreamCat))) 
@@ -623,6 +642,8 @@ ggplot() +
 p.dif <- bootstrapped.ts %>% group_by(region) %>% mutate(p.dif = ((mean/lag(mean))-1)*100)%>%
   ungroup()
 
+p.dif %>% group_by(region) %>% summarise(iqr = IQR(p.dif, na.rm = T)) %>% arrange(iqr)
+
 ##Look at correlations with percent change
 p.dif.cor <- p.dif %>%  
   select(region, year, p.dif) %>%
@@ -640,9 +661,16 @@ p.values <- p.dif %>%
   select(-year) %>%
   corrplot::cor.mtest(.)
 
+png('figures/RegionalCorrs.png', height = 4, width = 4, units = 'in', res = 250)
 corrplot::corrplot(p.dif.cor, p.mat = p.values$p, insig = "label_sig",
-         sig.level = c(.01, .05, .1), pch.cex = .9, pch.col = "red", type = 'upper', order = 'hclust', method = 'color')
+         sig.level = c(.01, .05, .1), pch.cex = .9, pch.col = "red", type = 'upper', order = 'hclust', method = 'color', tl.cex = .75)
+dev.off()
 
+GGally::ggpairs(p.dif %>%  
+  select(region, year, p.dif) %>%
+  spread(key = region, value = p.dif) %>%
+  filter(year > 1984) %>%
+  select(-year))
 
 p1 <- p.dif %>%
   ggplot(.,aes(x = region, y = p.dif)) + geom_violin(aes(fill = region)) + 
@@ -774,9 +802,6 @@ detach("package:raster", unload = TRUE)
 
 ```{r, include = F, eval = F}
 prismTemps <- read_feather('out/PRISMTemp_eco.feather')
-  
-prismPrecip<- prismPrecip %>% ungroup() %>%mutate(region = as.character(region), region = ifelse(region == 'Temperate Planes', 'Temperate Plains', region), region = factor(region))
-write_feather(prismPrecip, 'out/PRISMPrecip_eco.feather')  
 
 prismPrecip <- read_feather('out/PRISMPrecip_eco.feather')
 
@@ -814,6 +839,36 @@ bootstrapped.full <- bootstrapped.ts %>%
   left_join(prismPrecip %>% rename(Precip = value)) %>%
   left_join(tc)
 
+##Quick test
+boot.scaled <- bootstrapped.full %>%
+  select(region, mean, year, Precip, Temp) %>% 
+  group_by(region) %>%
+  mutate_at(vars(mean, Precip, Temp), scale) %>%
+  ungroup() %>%
+  group_by(year) %>%
+  summarise_at(vars(mean, Precip, Temp), mean)
+
+boot.scaled %>%
+  gather(mean, Precip, Temp, key = 'Measure', value = "value") %>%
+  ggplot(., aes(x = year, y = value, color = Measure)) + geom_line() +
+  geom_vline(xintercept = c(1985,1987,1994,1995,2009,2011,1997,2016))
+
+p.dif.scaled <- boot.scaled %>%
+  gather(mean, Precip, Temp, key = 'Measure', value = "value") %>%
+  group_by(Measure) %>% mutate(p.dif = ((value/lag(value))-1)*100)%>%
+  ungroup() %>%
+  select(-value) %>%
+  spread(Measure, p.dif) %>%
+  na.omit()
+
+p.dif.scaled %>%
+  gather(mean, Precip, Temp, key = 'Measure', value = "value") %>%
+  ggplot(., aes(x = year, y = value, color = Measure)) + geom_line() +
+  geom_vline(xintercept = c(1985,1987,1994,1995,2009,2011,1997,2016))
+
+GGally::ggpairs(boot.scaled[,-1])
+GGally::ggpairs(p.dif.scaled[,-1])
+
 write_feather(bootstrapped.full, paste0('out/bootstrappedFull_',iteration,'.feather'))
 ```
 
@@ -845,6 +900,7 @@ corr.t <- bootstrapped.full %>%
          p.value = purrr::map_dbl(cors, 'p.value')) %>%
   select(-c(data, cors))%>%
   mutate_at(vars(cor:p.value), round, digits =3) %>%
+  ungroup() %>%
   mutate(sig = ifelse(p.value < .05, 'yes', NA),
          Metric = factor(Metric, levels = c('Temp', 'Precip', 'NO3', 'NH4', 'SO4', 'pH', 'PNA', 'PDO', 'NAO')),
          signal = 'Trend') %>%

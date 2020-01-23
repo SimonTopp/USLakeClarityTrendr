@@ -184,6 +184,13 @@ over10 <- nhdLakes %>% filter(AREASQKM > 10) %>%
 
 st_write(over10, 'out/sampleLakes/Over10sqkm_cntr.shp')
 
+write_feather(over10 %>%
+                st_centroid(.) %>%
+                st_transform(crs = 4326) %>%
+                rowwise() %>%
+                mutate(lat = geometry[2],
+                       long = geometry[1]) %>% as.data.frame() %>% select(-geometry), 'out/Over10sqkm_cntr.feather')
+
 lakes.out <- over10 %>%
   st_set_geometry(NULL)
 

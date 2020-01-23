@@ -80,7 +80,7 @@ if(stage > 1){
     mutate(pred8 = map2(lm8, data, predict),
            pred5 = map2(lm5, data, predict)) %>%
     select(-c(lm8,lm5)) %>%
-    unnest(data, pred8, pred5) %>%
+    unnest(c(data, pred8, pred5)) %>%
     select(-c(l8,l5)) %>%
     rename(l8 = pred8, l5 = pred5) %>% gather(l5,l7,l8, key = 'sat', value = 'value') %>%
     spread(band, value) %>%
