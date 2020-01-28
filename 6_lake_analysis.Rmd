@@ -48,6 +48,14 @@ nla.2012 <- read.csv('in/NLA/nla2012_secchi_08232016.txt', stringsAsFactors = F)
   left_join(read.csv('in/NLA/nla2012_wide_siteinfo_08232016.txt') %>%
               select(SITE_ID, COMID = COMID2012, region = AGGR_ECO9_2015, 
                      lat = LAT_DD83, long = LON_DD83))
+
+check <- read.csv('in/NLA/nla2012_wide_siteinfo_08232016.txt', stringsAsFactors = F)
+
+
+## Original NLA Sample was all proposed lakes, filter it down to just the actually sampled ones.
+Preds.out <- Preds.out %>% filter(COMID %in% nla.2012$COMID)
+lake.join <- lake.join %>% filter(COMID %in% nla.2012$COMID)
+
 nlaFull <- nla.2007 %>%
   mutate(nla.year = 2007) %>%
   bind_rows(nla.2012 %>% mutate(nla.year = 2012)) %>%
@@ -137,7 +145,7 @@ counts <- summ.meds %>%
 summ.meds %>%
   filter(!is.na(value)) %>%
   group_by(COMID, year) %>%
-  summarise(dataFrac = n()/13060) %>% ## or 13060 for random, 2270 for NLA
+  summarise(dataFrac = n()/1012) %>% ## or 13060 for random, 2270 for NLA
   ggplot(., aes(x = year, y = dataFrac)) + geom_col()
 
 ####  Create wide dataset 
@@ -831,6 +839,9 @@ tc <- read.csv('../aquaModel/in/IsoPdo.csv') %>%
   group_by(year) %>%
   summarise_at(vars(PDO, PNA, SOI, NAO), mean)
 
+tc %>% gather(PDO:NAO, key = 'tc', value = 'value') %>%
+  ggplot(., aes(x = year, y = value, color = tc)) + geom_line() + 
+  geom_vline(xintercept = c(1985,1987,1994,1995,2009,2011,1997,2016))
 
 ## Make a master dataset of all the stl, nadp, and prism data.
 bootstrapped.full <- bootstrapped.ts %>%
@@ -846,12 +857,14 @@ boot.scaled <- bootstrapped.full %>%
   mutate_at(vars(mean, Precip, Temp), scale) %>%
   ungroup() %>%
   group_by(year) %>%
-  summarise_at(vars(mean, Precip, Temp), mean)
+  summarise_at(vars(mean, Precip, Temp), mean, na.rm = T)
 
 boot.scaled %>%
   gather(mean, Precip, Temp, key = 'Measure', value = "value") %>%
   ggplot(., aes(x = year, y = value, color = Measure)) + geom_line() +
   geom_vline(xintercept = c(1985,1987,1994,1995,2009,2011,1997,2016))
+
+bootstrapped.full %>% 
 
 p.dif.scaled <- boot.scaled %>%
   gather(mean, Precip, Temp, key = 'Measure', value = "value") %>%
@@ -886,6 +899,8 @@ bootstrapped.full <- read_feather(paste0('out/bootstrappedFull_',iteration,'.fea
 #   facet_wrap(~region, scales = 'free')
 # 
 # ggplotly(p)
+
+ggplot()
 
 #Look at overall correlation
 corr.t <- bootstrapped.full %>%

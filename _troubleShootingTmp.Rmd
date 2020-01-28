@@ -953,4 +953,18 @@ corrplot::corrplot.mixed(cor(deTrended %>% select(-year)))
 
 ```
 
+```{r}
+## Table of variables for manuscript
+
+features <- "NR, BG, dWL, inStreamCat, PctCarbResidCat, Precip8110Cat, Tmean8110Cat, RunoffCat, ClayCat, SandCat, OmCat, PermCat, RckdepCat, WtDepCat, BFICat, ElevCat, AOD, KffactCat, CatAreaSqKm, PctAg2006Slp10Cat, NPDESDensCat, HydrlCondCat, PctImp2006Cat, pctUrban2006, pctForest2006, PctCrop2006Cat, pctWetland2006, WetIndexCat, areasqkm, meandused"
+
+varTable <- tibble(Variable = c('Lake Area', 'Lake Depth', 'NIR/Red', 'Blue/Green', 'Forel-Ule Index', 'Network Status', 'Percent Carbonate', 'Mean Precipitation', 'Mean Temperature', 'Runoff', 'Percent Clay', 'Percent Sand', 'Percent Organic Matter', 'Soil Permeability', 'Bedrock Depth', 'Water Table Depth', 'Base Flow Index', 'Elevation', 'Atmospheric Optical Depth', 'Kffactor', 'Catchement Area', 'Percent Agriculture', 'NPDE Density', 'Hydraulic Conductivity', 'Percent Impervious Surface', 'Percent Urban', 'Percent Forest', 'Percent Crop', 'Percent Wetland', 'Topographic Wetness Index'), Description = c('Lake area from NHD v2 (sq. km)', 'Mean lake depth from NHD v2 (m)', 'Band Ratio', 'Band Ratio', 'Dominant Color Wavelength as defined by Wang et al. (2015)', 'Binary on/off network status for lake based on NHD flowlines', 'Percent of catchment area classified as lithology type: carbonate residual material', 'PRISM climate data - 30-year normal mean precipitation (mm): Annual period: 1981-2010 within the catchment', 'PRISM climate data - 30-year normal mean temperature (C°): Annual period: 1981-2010 within the catchment', 'Mean runoff (mm) within catchment', 'Mean % clay content of soils (STATSGO) within catchment', 'Mean % sand content of soils (STATSGO) within catchment', 'Mean organic matter content (% by weight) of soils (STATSGO) within catchment', 'Mean permeability (cm/hour) of soils (STATSGO) within catchment', 'Mean depth (cm) to bedrock of soils (STATSGO) within catchment','Mean seasonal water table depth (cm) of soils (STATSGO) within catchment','Base flow is the component of streamflow that can be attributed to ground-water discharge into streams. The BFI is the ratio of base flow to total flow, expressed as a percentage, within catchment', 'Mean catchment elevation (m)', 'Atmospheric Optical Depth over observation pulled from MERRA 2 reanalysis data', 'Mean of STATSGO Kffactor raster within catchment. The Universal Soil Loss Equation (USLE) and represents a relative index of susceptibility of bare, cultivated soil to particle detachment and transport by rainfall', 'Area of local catchment (square km)', '% of catchment area classified as ag land cover (NLCD 2006 classes 81-82) occurring on slopes > 10%', 'Density of permitted NPDES (National Pollutant Discharge Elimination System) sites within catchment (sites/square km)', 'Mean lithological hydraulic conductivity (micrometers per second) content in surface or near surface geology within catchment', 'Mean imperviousness of anthropogenic surfaces within catchment (NLCD 2006)','Percent of catchment classified as either medium or high density urban (NLCD 2006)', 'Percent of catchment classified as either deciduous, coniferous, or mixed forest (NLCD 2006)', 'Percent of catchment area classified as crop land use (NLCD 2006 class 82)', 'Percent of catchment classified as woody or herbaceous wetland landcover (NLCD 2006)', 'Mean Composite Topographic Index (CTI)[Wetness Index] within catchment'))
+
+varTable %>%
+  kable(.) %>% #,'latex', booktabs = T) %>%
+  kable_styling(bootstrap_options = c('striped', "condensed")) %>%
+  column_spec(1, border_right = T) %>%
+  row_spec(c(2,3,4,5,9,10,27,29, 30, 16, 20), bold = T) %>%
+  save_kable('figures/FigTable.png', height = 9)
+```
 
