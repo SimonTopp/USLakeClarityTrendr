@@ -263,7 +263,7 @@ p1 <- meanFull %>%
   #geom_point() +
   scale_color_viridis_d(end = .5) +
   facet_wrap(~region, scales = 'free_y', ncol = 2) +
-  labs(y = 'Mean Summer Clarity (m)', x = 'Year') +
+  labs(y = 'Mean Summer Clarity (m)', x = 'Year', color = 'Source') +
   theme(strip.text = element_text(colour = 'white'),
         legend.position = c(.75, .05),
         legend.direction = 'horizontal',
@@ -453,7 +453,7 @@ summ.meds.full <- read_feather(paste0('out/TS_Preds/NLA2012_cntr_',iteration,'.f
   group_by(COMID, year, region) %>%
   summarise(secchi.med = median(value))
 
-lake.join <- read_feather('out/NLA2012LakesFull.feather') %>% mutate(sample = 'NLA') %>%
+lake.join <- read_feather('out/NLA2012LakesFull.feather') %>% filter(COMID %in% nla.2012$COMID) %>% mutate(sample = 'NLA') %>%
   bind_rows(read_feather('out/Over10LakesFull.feather') %>% mutate(sample = 'Over10')) %>%
   bind_rows(read_feather('out/EcoReg2000LakesFull.feather') %>% mutate(sample = 'Random')) %>%
   distinct(COMID, .keep_all = T)
@@ -841,7 +841,7 @@ tc <- read.csv('../aquaModel/in/IsoPdo.csv') %>%
 
 tc %>% gather(PDO:NAO, key = 'tc', value = 'value') %>%
   ggplot(., aes(x = year, y = value, color = tc)) + geom_line() + 
-  geom_vline(xintercept = c(1985,1987,1994,1995,2009,2011,1997,2016))
+  geom_vline(xintercept = c(1985,1987,1994,1995,2009,2011,1992))
 
 ## Make a master dataset of all the stl, nadp, and prism data.
 bootstrapped.full <- bootstrapped.ts %>%
@@ -864,7 +864,6 @@ boot.scaled %>%
   ggplot(., aes(x = year, y = value, color = Measure)) + geom_line() +
   geom_vline(xintercept = c(1985,1987,1994,1995,2009,2011,1997,2016))
 
-bootstrapped.full %>% 
 
 p.dif.scaled <- boot.scaled %>%
   gather(mean, Precip, Temp, key = 'Measure', value = "value") %>%
@@ -888,19 +887,6 @@ write_feather(bootstrapped.full, paste0('out/bootstrappedFull_',iteration,'.feat
 
 ```{r}
 bootstrapped.full <- read_feather(paste0('out/bootstrappedFull_',iteration,'.feather'))
-
-# Just take a look at the data a little  
-# p <- stl.full %>%
-#   select(region, date, trend_mean, pH, raw_mean) %>%
-#   gather(trend_mean:raw_mean, key = 'metric', value = 'value') %>%
-#   ggplot(., aes(x = date, y = value, color = metric)) + 
-#   geom_line(alpha = .3) +
-#   geom_smooth(se = F, span = .3) +
-#   facet_wrap(~region, scales = 'free')
-# 
-# ggplotly(p)
-
-ggplot()
 
 #Look at overall correlation
 corr.t <- bootstrapped.full %>%
@@ -927,7 +913,7 @@ corr.t %>%
   st_simplify(., dTolerance = 1000) %>%
   ggplot(.) +  geom_sf(aes(fill = cor, color = sig)) + 
   facet_wrap(~Metric) + 
-  scale_fill_gradient2(low = 'red', high = 'blue', mid = 'grey', midpoint = 0) +
+  scale_fill_gradient2(low = 'red', high = 'blue', mid = 'grey', midpoint = 0, breaks = c(-.5,-.25,0,.25,.5), labels = c('-0.5', '-0.25', '0', '0.25', '0.5')) +
   scale_color_manual(values = 'black', na.translate = F) +
   theme_bw() +
   theme(axis.text.x = element_blank(),
@@ -939,7 +925,7 @@ corr.t %>%
        title = 'Potential Correlates with Overall Trend') +
   guides(color = guide_legend(label = F))
 
-ggsave(paste0('figures/',mod,'RegionalCorrelates.png'), height = 7, width = 7.5, units = 'in')
+ggsave('figures/RegionalCorrelates.png', height = 5.5, width = 6, units = 'in')
 ```
 
 

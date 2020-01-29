@@ -629,6 +629,7 @@ funcs.8 <- bands %>%
   mutate(lm8 = purrr::map(band, lm8, x = refCompPre))
 funcs.5 <- bands %>%
   mutate(lm5 = purrr::map(band, lm5, x = refCompPre))
+
 save(funcs.8, funcs.5, file = 'models/landsat_poly_corrs.Rdata')
 
 

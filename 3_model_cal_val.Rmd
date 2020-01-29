@@ -94,8 +94,12 @@ output.full %>% mutate(yearGroups = cut_number(year, 20)) %>%
 model$modelInfo$varImp(model$finalModel) %>%
   mutate(Feature = fct_reorder(rownames(.), Overall, .desc = T)) %>%
   arrange(Overall) %>%
-  ggplot(., aes(x = Feature, y = Overall)) + geom_col() + coord_flip() +
-  ggtitle('Feature Importance')
+  ggplot(., aes(x = Feature, y = Overall)) + 
+  geom_col() +
+  scale_x_discrete(labels = c('Forel-Ule Index','Blue/Green','Mean Temperature','Forest Cover','Lake Depth','NIR/Red','Wetland Cover', 'Mean Runoff','Water Table Depth','Topographic Wetness','Kffactor (Erosion Index)')) + 
+  coord_flip() +
+  theme_bw() +
+  labs(title = 'Feature Importance', y = 'Importance (Model Gain)') 
 
 ggsave('figures/FeatImp.png', width = 3.5, height = 3, units = 'in')
 ```
@@ -236,6 +240,7 @@ evals %>% select(mae, mape, bias) %>% mutate(Validation = 'Point.Based') %>% bin
   mutate_if(is.numeric, round, 3) %>%
   kable() %>%
   kable_styling()
+
 ## Next do it with all the field data we got.  
 # We add the additional step of averaging per lake before per month because sampling is really uneven. 
 # Load in lagos and wqp data
@@ -279,9 +284,10 @@ evals %>% select(mae, mape, bias) %>% mutate(Validation = 'Point.Based') %>% bin
 # 
 # write_feather(fieldMean, 'out/RegionalsInSituMeans.feather')
 
+
 ## A little backwords but read in the bootstrapped predictions from 5_lake_analysis
 fieldmatch.full <- read_feather('out/RegionalsInSituMeans.feather') %>% mutate(Measure = 'In.Situ') %>%
-  select(year, region, mean, se = sd, Measure) %>% bind_rows(read_feather('out/TS_Preds/NLA_bootstrapped.feather') %>% mutate(Measure = 'Modelled'))
+  select(year, region, mean, se = sd, Measure) %>% bind_rows(read_feather('out/TS_Preds/NLA2012_cntr_bootstrapped.feather') %>% mutate(Measure = 'Modelled'))
 
 
 p1 <- fieldmatch.coin %>%
@@ -307,7 +313,7 @@ p2 <- fieldmatch.full %>%
 g <- grid.arrange(p1,p2, ncol = 2, widths = c(1,1.7), left = 'Mean Clarity (m)', bottom = 'Year')
 
 
-ggsave('figures/CoinVFullObs.png', plot = g, width = 5.5, height = 9, units = 'in')
+ggsave('figures/CoinVFullObsShort.png', plot = g, width = 5.5, height = 7, units = 'in')
 
 
 ##Fig for seminar pres
