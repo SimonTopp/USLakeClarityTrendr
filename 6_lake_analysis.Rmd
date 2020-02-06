@@ -169,7 +169,7 @@ bootstrapped.ts <- summ.meds.wide %>%
 
 ## Generate a figure showing the mean summer clarity and 'stability' (sd of bootstrap iterations) for each lake.
 bootstrapped.ts %>%
-  filter(year < 2019, year > 1984) %>%
+  filter(year < 2019) %>%
   ggplot(., aes(x = year, y = mean)) +
   geom_errorbar(aes(ymin = mean - se, ymax = mean + se), color = 'grey60', alpha = .4) +
   geom_path(color = 'red') +
@@ -254,7 +254,7 @@ nla.situ.cor <- meanFull %>% select(year,region, mean, source) %>% spread(source
 colors = viridis(9, direction = -1)
 
 p1 <- meanFull %>%
-  filter(year < 2019, year > 1984) %>%
+  filter(year < 2019) %>%
   filter(source != 'In.Situ', source != 'Large.Lakes') %>%
   ggplot(., aes(x = year, y = mean, group = source, color = source)) +
   geom_errorbar(aes(ymin = mean - se, ymax = mean + se), color = 'grey60', alpha = .8) +
@@ -461,7 +461,7 @@ lake.join <- read_feather('out/NLA2012LakesFull.feather') %>% filter(COMID %in% 
 
 ##Real Quick look at differences between the samples
 lake.join %>% filter(sample == 'NLA'|sample == 'Random', COMID %in% summ.meds.full$COMID) %>%
-  ggplot() + geom_freqpoly(aes(x = areasqkm, color = sample)) + scale_x_log10() + facet_wrap(~region)
+  ggplot() + geom_density(aes(x = areasqkm, color = sample)) + scale_x_log10() + facet_wrap(~region)
 
 check <- lake.join %>% filter(sample == 'NLA'|sample == 'Random', COMID %in% summ.meds.full$COMID) %>%
   group_by(sample, region) %>% summarise(meanSize = median(areasqkm)) %>% spread(sample, meanSize) %>% mutate(dif = NLA/Random)
@@ -503,16 +503,16 @@ ggplot(mk, aes(x = sen.slope)) + geom_density(aes(fill = Size.Group), alpha = .4
 ggsave('figures/TrendbySizeClass.png', width = 6, height = 3, units = 'in')
 
 ## Try another version
-ggplot(mk %>% left_join(mk.ave), aes(x = Size.Group, y = sen.slope, group = Size.Group)) + 
+ggplot(mk %>% left_join(mk.ave), aes(x = Size.Group, y = sen.slope, group = Size.Group))  +
+  geom_violin() + 
+  geom_boxplot(width = .1, fill = 'grey60') +
   geom_hline(yintercept = 0, color = 'red') +
-  geom_violin(aes(fill = count), alpha = .6) + 
-  geom_boxplot(width = .2, fill = 'grey60', alpha = .4) +
-  scale_fill_viridis_c('Number of\nLakes', option = 'plasma', end = .8, trans = 'log10') +
+  #scale_fill_viridis_c('Number of\nLakes', option = 'plasma', end = .8, trans = 'log10') +
   coord_cartesian(ylim = c(-5,5))+
   labs(x = 'Size Group (sq. km)', y = 'Slope Distribution (cm/year)') +
   theme_bw()
 
-ggsave('figures/TrendbySizeClassViolin.png', width = 5, height = 2.5, units = 'in')
+ggsave('figures/TrendbySizeClassViolinV2.png', width = 2.5, height = 2.5, units = 'in')
 
 
 wilcox.test(mk$sen.slope[mk$Size.Group == '<1'], mk$sen.slope[mk$Size.Group == '1-10'], conf.int = T)

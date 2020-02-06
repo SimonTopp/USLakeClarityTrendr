@@ -188,7 +188,7 @@ p1 <- ggplot(output, aes(x = Actual, y = Predicted)) +
   #scale_x_continuous(trans = 'log10', labels = scales::comma) +
   #scale_y_continuous(trans = 'log10', labels = scales::comma) +
   #coord_equal(ratio = 1) +
-  labs(title = 'Observation Level Validation', x = 'Actual', y = 'Predicted')
+  labs(title = 'Observation Level Validation', x = 'In Situ (m)', y = 'Remote Sensing (m)')
 
 p2 <- fieldmatch.coin %>%
   spread(Measure, mean) %>%
@@ -203,18 +203,18 @@ p2 <- fieldmatch.coin %>%
   #scale_x_continuous(trans = 'log10', labels = scales::comma) +
   #scale_y_continuous(trans = 'log10', labels = scales::comma) +
   #coord_equal(ratio = 1) +
-  labs(title = 'Aggregated Validation', x = 'Actual', y = 'Predicted')
+  labs(title = 'Aggregated Validation', x = 'In Situ (m)', y = 'Remote Sensing (m)')
 
 
 p3 <- ggplot(fieldmatch.coin, aes(x = year, y = mean, color = Measure)) + 
   #geom_point(alpha = .1) +
   geom_line() + 
-  scale_color_viridis_d(end = .6, labels = c('Actual', 'Predicted')) +
+  scale_color_viridis_d(end = .6, labels = c('In Situ', 'Remote Sensing')) +
   facet_wrap(~region, scales = 'free', ncol = 2) +
   labs(title = 'Timeseries Using Coincident Hold-Out Data',
        x = 'Year', y = 'Mean Summer Clarity (m)') +
   theme_bw() +
-  theme(legend.position = c(.7,.1),
+  theme(legend.position = c(.75,.1),
         legend.direction = 'horizontal')
 
 

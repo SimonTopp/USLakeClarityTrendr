@@ -968,3 +968,74 @@ varTable %>%
   save_kable('figures/FigTable.png', height = 9)
 ```
 
+
+
+```{r}
+## Look at the differences between preds for lake vs cntr pulls
+over10NLA <- lake.join %>% filter(areasqkm > 10)
+
+pullComp <- read_feather(paste0('out/TS_Preds/NLA2012_cntr_',iteration,'.feather')) %>%
+  bind_rows(read_feather(paste0('out/TS_Preds/NLA2012_FullLake_',iteration,'.feather'))) %>% filter(COMID %in% over10NLA$COMID)
+
+#filter where we have preds for both
+counts <- pullComp %>%
+  group_by(COMID, system.index) %>%
+  summarise(count = n()) %>%
+  filter(count > 1) %>%
+  mutate(uID = paste0(COMID, system.index))
+
+check <- pullComp %>% mutate(uID = paste0(COMID, system.index)) %>%
+  filter(uID %in% counts$uID) %>%
+  select(uID, value, lakeSamp) %>%
+  spread(lakeSamp, value)
+
+ggplot(check, aes(x = NLA2012_cntr, y = NLA2012_FullLake)) +
+  geom_point() + geom_abline(color = 'red') +
+  ggtitle('Full Lake vs Centerpoint Predictions \nfor lakes over 10 sq km in the NLA2012 sample\n red line is 1:1') +
+  stat_poly_eq(aes(label =  paste(stat(adj.rr.label))),
+               formula = y~x, parse = TRUE, 
+               label.y = Inf, vjust = 1.3)
+
+summ.meds <- pullComp %>%
+  filter(month %in% c(5:9),
+         year < 2019) %>% ##Incomplete obs for 2019 so we won't use it.
+  group_by(COMID, year, region, lakeSamp) %>%
+  summarise(secchi.med = median(value))
+
+##Check how many years we have observations for each lake and only take lakes with > 10 years of obs. We loose ~500 lakes.
+counts <- summ.meds %>%
+  group_by(COMID) %>%
+  summarise(count = n()) %>%
+  #filter(count > 10) %>%
+  left_join(lake.join)
+
+####  Create wide dataset 
+summ.meds.wide <- summ.meds %>%
+  filter(COMID %in% counts$COMID) %>%
+  spread(year, secchi.med)
+
+##Check regional counts to make sure they're reasonable
+summ.meds.wide %>% group_by(region) %>% summarise(count = n())
+
+###### Apply 1000 rounds of bootstrapping to yearly summer medians
+
+## Map over the regions and pull out summary stats
+bootstrapped.ts <- summ.meds.wide %>%
+  group_by(region, lakeSamp) %>%
+  nest() %>%
+  mutate(boot.means= purrr::map(data, ~boot(.,boot.med, R = 1000)),
+         boots.summ = purrr::map(boot.means, boot.summary)) %>%
+  select(-boot.means, -data) %>%
+  unnest(boots.summ)
+
+## Generate a figure showing the mean summer clarity and 'stability' (sd of bootstrap iterations) for each lake.
+bootstrapped.ts %>%
+  filter(year < 2019) %>%
+  ggplot(., aes(x = year, y = mean, color = lakeSamp)) +
+  #geom_errorbar(aes(ymin = mean - se, ymax = mean + se), color = 'grey60', alpha = .4) +
+  geom_line() +
+  theme_bw() +
+  geom_point() +
+  facet_wrap(~region, scales = 'free', ncol = 2)
+```
+
