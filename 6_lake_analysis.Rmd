@@ -216,6 +216,10 @@ summaryMK %>%
 
 write_feather(bootstrapped.ts, paste0('out/TS_Preds/',lakeSamp,'_bootstrapped.feather'))
 write_feather(summaryMK, paste0('out/TS_Preds/',lakeSamp,'_summaryMK.feather'))
+
+
+## Look at distribution of size across regions to see if there are only big lakes in the southeast.
+
 ```
 
 
@@ -243,9 +247,9 @@ nla.rand.cor <- meanFull %>% select(year,region, mean, source) %>% spread(source
 nla.situ.cor <- meanFull %>% select(year,region, mean, source) %>% spread(source, mean) %>%
   group_by(region) %>%
   nest() %>%
-  mutate(NLA.Random.Corr = purrr::map(data, ~cor.test(.$NLA, .$In.Situ)),
-         cor = purrr::map_dbl(NLA.Random.Corr, 'estimate'),
-         p.value = purrr::map_dbl(NLA.Random.Corr, 'p.value'),
+  mutate(NLA.Situ.Corr = purrr::map(data, ~cor.test(.$NLA, .$In.Situ)),
+         cor = purrr::map_dbl(NLA.Situ.Corr, 'estimate'),
+         p.value = purrr::map_dbl(NLA.Situ.Corr, 'p.value'),
          sig = ifelse(p.value < .01, '***', ifelse(p.value < .05, '**', ifelse(p.value < 0.1, '*', NA))))
 
 
@@ -452,8 +456,8 @@ summ.meds.full <- read_feather(paste0('out/TS_Preds/NLA2012_cntr_',iteration,'.f
   year < 2019) %>% ##Incomplete obs for 2019 so we won't use it.
   group_by(COMID, year, region) %>%
   summarise(secchi.med = median(value))
-
-lake.join <- read_feather('out/NLA2012LakesFull.feather') %>% filter(COMID %in% nla.2012$COMID) %>% mutate(sample = 'NLA') %>%
+#%>% filter(COMID %in% nla.2012$COMID) 
+lake.join <- read_feather('out/NLA2012LakesFull.feather') %>% mutate(sample = 'NLA') %>%
   bind_rows(read_feather('out/Over10LakesFull.feather') %>% mutate(sample = 'Over10')) %>%
   bind_rows(read_feather('out/EcoReg2000LakesFull.feather') %>% mutate(sample = 'Random')) %>%
   distinct(COMID, .keep_all = T)
@@ -553,7 +557,8 @@ ggplot(mk, aes(x = areasqkm, y = sen.slope)) + geom_point() + scale_x_log10()
 
 
 #Look at the distribution of clarity change across in-network and out-of-network lakes
-ggplot(mk, aes(x = sen.slope)) + geom_density(alpha = .4, aes(fill = factor(inStreamCat))) 
+ggplot(mk, aes(x = sen.slope)) + geom_density(alpha = .4, aes(fill = factor(inStreamCat)))
+wilcox.test(mk$sen.slope[mk$inStreamCat == 0], mk$sen.slope[mk$inStreamCat == 1], conf.int = T)
 
 
 ##Quick look at size distributions from LAGOS
@@ -567,6 +572,112 @@ ggplot(lagos.secchi, aes(x = lake_area_ha)) + geom_density() + scale_x_log10()
 
 mean(lagos.secchi$areasqkm)
 median(lagos.secchi$areasqkm)
+
+
+## Framework for looking at trends relationships to various things
+mk <- mk %>% mutate(pctForest2006 = PctDecid2006Cat + PctConif2006Cat + PctMxFst2006Cat,
+          pctUrban2006 = PctUrbMd2006Cat + PctUrbHi2006Cat,
+          pctWetland2006 = PctWdWet2006Cat + PctHbWet2006Cat)
+
+## simple regressions and correlations by region
+regsNcors = function(i, r){
+  data = mk %>% filter(region == r)
+  f = as.formula(paste0("sen.slope~",i))
+  lm = lm(f, data)
+  out = broom::tidy(lm) %>% .[2,]
+  c = cor.test(c(data[['sen.slope']]), data[[i]], method = 'spearman') %>% broom::tidy()
+  out$corr = c$estimate
+  out$cor.p = c$p.value
+  out$region = r
+  return(out)
+}
+
+## Overall regressions and correlations by features
+Featcors = function(i){
+  f = as.formula(paste0("sen.slope~",i))
+  lm = lm(f, mk)
+  out = broom::tidy(lm) %>% .[2,]
+  c = cor.test(c(mk[['sen.slope']]), mk[[i]], method = 'spearman') %>% broom::tidy()
+  out$corr = c$estimate
+  out$cor.p = c$p.value
+  return(out)
+}
+
+## First look at all features:
+features = mk %>% ungroup() %>% select_if(is.numeric) %>% select(-c(sen.slope, fcode, OBJECTID, p.value)) %>% names(.) 
+featCorrsFull <- features %>% map_dfr(Featcors) %>% arrange(abs(corr))
+
+##Look at restricted list that were used for initial modelling
+features <- str_split('inStreamCat, PctCarbResidCat, Precip8110Cat, Tmean8110Cat, RunoffCat, ClayCat, SandCat, OmCat, PermCat, RckdepCat, WtDepCat, ElevCat, BFICat, KffactCat, CatAreaSqKm, PctAg2006Slp10Cat, NPDESDensCat, HydrlCondCat, PctImp2006Cat, pctUrban2006, pctForest2006, PctCrop2006Cat, pctWetland2006, WetIndexCat, areasqkm, meandused', pattern = ', ')[[1]]
+regions = as.character(unique(mk$region))
+comb = expand_grid(features, regions)
+
+## Overall
+featCorrs <- features %>% map_dfr(Featcors)
+
+featCorrs %>% filter(cor.p < .01) %>% mutate(term = fct_reorder(term, corr)) %>% 
+  ggplot(.,aes(x = term, y = corr, fill = cor.p)) + 
+  geom_col() + 
+  scale_x_discrete(labels = c('Pct Clay', 'Topographic Wetness', 'Lake Size', 'Catchment Area', 'Pct Wetland', 'Pct Carbonate', 'Network Status', 'Precip','Temperature', 'Mean Depth', 'Pct Organic Matter', 'Catchment Permeability', 'Pct Ag', 'Pct Urban', 'Runoff', 'Pct Impervious', 'Pct Sand', 'BaseFlow Index', 'Pct Forest')) +
+  labs(x = 'Feature', y = 'Spearmans Correlation Coefficient', fill = 'p.value', title = 'Significant Correlations Between Observed Trends and\n Lake/Catchment properties') +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1)) 
+
+## Look by region
+## This is a dumb slow way to do this but it works
+Regional_corrs = map2_dfr(comb$features, comb$regions, ~regsNcors(.x, .y))
+
+Regional_corrs %>% filter(cor.p < 0.01) %>% arrange(., region, corr) %>% ggplot(., aes(x = term, y = corr, fill = cor.p)) + geom_col() + theme(axis.text.x = element_text(angle = 45, hjust = 1)) + geom_hline(yintercept = 0, color = 'red') + facet_wrap(~region, ncol = 2)
+
+## Look by correlate
+Regional_corrs %>% filter(cor.p < 0.01) %>% ggplot(., aes(x = region, y = corr, fill = cor.p)) + geom_col() + theme(axis.text.x = element_text(angle = 45, hjust = 1)) + geom_hline(yintercept = 0, color = 'red') + facet_wrap(~term)
+  
+## Quicky PCA experiment, doesn't really show very good clustering of trends
+library("factoextra")
+mkPca <- mk %>% ungroup() %>% select_if(is.numeric) %>% na.omit() %>%   select(inStreamCat, PctCarbResidCat, Precip8110Cat, Tmean8110Cat, RunoffCat, ClayCat, SandCat, OmCat, PermCat, RckdepCat, WtDepCat, BFICat, ElevCat, BFICat, KffactCat, CatAreaSqKm, PctAg2006Slp10Cat, ElevCat, NPDESDensCat, HydrlCondCat, PctImp2006Cat, pctUrban2006, pctForest2006, PctCrop2006Cat, pctWetland2006, WetIndexCat, areasqkm, meandused)
+  
+pcaTrendIndex <-  mk %>% ungroup() %>% select_if(is.numeric) %>% na.omit() %>% 
+  mutate(trendClass = ifelse(sen.slope > 0, 'increasing', 'decrasing'))
+#(trendClass = ifelse(p.value >0.05, 'none', ifelse(p.value <= 0.05 & sen.slope > 0, 'increasing', 'decrasing')))
+
+pca <- prcomp(mkPca, center = T, scale = T)
+fviz_pca_ind(pca, geom.ind = "point", pointshape = 21, 
+             pointsize = 2, 
+             fill.ind = pcaTrendIndex$trendClass,
+             col.ind = "black", 
+             palette = "jco", 
+             addEllipses = TRUE,
+             label = "var",
+             col.var = "black",
+             repel = TRUE,
+             legend.title = "Diagnosis") +
+  ggtitle("2D PCA-plot from 30 feature dataset") +
+  theme(plot.title = element_text(hjust = 0.5))
+get_pca(pca)
+
+fviz_screeplot(pca)
+var = get_pca_var(pca)
+var$contrib
+fviz_contrib(pca, choice = "var", axes = 1, top = 10)
+fviz_contrib(pca, choice = 'var', axes = 2, top = 10)
+
+
+##Slice and dice a la Tamlin
+# Just look at end member lakes (highest and lowest trends 0-5 95-100 percentiles)
+# Look at scatterplots, look for some more complexity.
+
+## Quick RF experiment
+library(randomForest)
+rf <- randomForest(mkPca, pcaTrendIndex$sen.slope, ntree = 200)
+varImpPlot(rf)
+tibble(predicted = rf$predicted, actual = rf$y) %>%
+  ggplot(., aes(x = predicted, y = actual)) + geom_hex() + scale_fill_continuous(trans = 'log10') + geom_smooth() + geom_abline() + stat_poly_eq(aes(label =  paste(stat(adj.rr.label))),
+               formula = y~x, parse = TRUE, 
+               label.y = Inf, vjust = 1.3)
+
+mae(rf$predicted, rf$y)
+
+
+
 ```
 
 
