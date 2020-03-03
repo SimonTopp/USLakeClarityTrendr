@@ -574,14 +574,15 @@ mean(lagos.secchi$areasqkm)
 median(lagos.secchi$areasqkm)
 
 
-## Framework for looking at trends relationships to various things
+## Framework for looking at trends and correlations to various things
 mk <- mk %>% mutate(pctForest2006 = PctDecid2006Cat + PctConif2006Cat + PctMxFst2006Cat,
           pctUrban2006 = PctUrbMd2006Cat + PctUrbHi2006Cat,
           pctWetland2006 = PctWdWet2006Cat + PctHbWet2006Cat)
+mkSig <- mk %>% filter(p.value <= 0.01)
 
 ## simple regressions and correlations by region
 regsNcors = function(i, r){
-  data = mk %>% filter(region == r)
+  data = mkSig %>% filter(region == r)
   f = as.formula(paste0("sen.slope~",i))
   lm = lm(f, data)
   out = broom::tidy(lm) %>% .[2,]
@@ -595,9 +596,9 @@ regsNcors = function(i, r){
 ## Overall regressions and correlations by features
 Featcors = function(i){
   f = as.formula(paste0("sen.slope~",i))
-  lm = lm(f, mk)
+  lm = lm(f, mkSig)
   out = broom::tidy(lm) %>% .[2,]
-  c = cor.test(c(mk[['sen.slope']]), mk[[i]], method = 'spearman') %>% broom::tidy()
+  c = cor.test(c(mkSig[['sen.slope']]), mkSig[[i]], method = 'spearman') %>% broom::tidy()
   out$corr = c$estimate
   out$cor.p = c$p.value
   return(out)
@@ -618,7 +619,7 @@ featCorrs <- features %>% map_dfr(Featcors)
 featCorrs %>% filter(cor.p < .01) %>% mutate(term = fct_reorder(term, corr)) %>% 
   ggplot(.,aes(x = term, y = corr, fill = cor.p)) + 
   geom_col() + 
-  scale_x_discrete(labels = c('Pct Clay', 'Topographic Wetness', 'Lake Size', 'Catchment Area', 'Pct Wetland', 'Pct Carbonate', 'Network Status', 'Precip','Temperature', 'Mean Depth', 'Pct Organic Matter', 'Catchment Permeability', 'Pct Ag', 'Pct Urban', 'Runoff', 'Pct Impervious', 'Pct Sand', 'BaseFlow Index', 'Pct Forest')) +
+  #scale_x_discrete(labels = c('Pct Clay', 'Topographic Wetness', 'Lake Size', 'Catchment Area', 'Pct Wetland', 'Pct Carbonate', 'Network Status', 'Precip','Temperature', 'Mean Depth', 'Pct Organic Matter', 'Catchment Permeability', 'Pct Ag', 'Pct Urban', 'Runoff', 'Pct Impervious', 'Pct Sand', 'BaseFlow Index', 'Pct Forest')) +
   labs(x = 'Feature', y = 'Spearmans Correlation Coefficient', fill = 'p.value', title = 'Significant Correlations Between Observed Trends and\n Lake/Catchment properties') +
   theme(axis.text.x = element_text(angle = 45, hjust = 1)) 
 
@@ -630,12 +631,13 @@ Regional_corrs %>% filter(cor.p < 0.01) %>% arrange(., region, corr) %>% ggplot(
 
 ## Look by correlate
 Regional_corrs %>% filter(cor.p < 0.01) %>% ggplot(., aes(x = region, y = corr, fill = cor.p)) + geom_col() + theme(axis.text.x = element_text(angle = 45, hjust = 1)) + geom_hline(yintercept = 0, color = 'red') + facet_wrap(~term)
+
   
 ## Quicky PCA experiment, doesn't really show very good clustering of trends
 library("factoextra")
-mkPca <- mk %>% ungroup() %>% select_if(is.numeric) %>% na.omit() %>%   select(inStreamCat, PctCarbResidCat, Precip8110Cat, Tmean8110Cat, RunoffCat, ClayCat, SandCat, OmCat, PermCat, RckdepCat, WtDepCat, BFICat, ElevCat, BFICat, KffactCat, CatAreaSqKm, PctAg2006Slp10Cat, ElevCat, NPDESDensCat, HydrlCondCat, PctImp2006Cat, pctUrban2006, pctForest2006, PctCrop2006Cat, pctWetland2006, WetIndexCat, areasqkm, meandused)
+mkPca <- mkSig %>% ungroup() %>% select_if(is.numeric) %>% na.omit() %>%   select(inStreamCat, PctCarbResidCat, Precip8110Cat, Tmean8110Cat, RunoffCat, ClayCat, SandCat, OmCat, PermCat, RckdepCat, WtDepCat, BFICat, ElevCat, BFICat, KffactCat, CatAreaSqKm, PctAg2006Slp10Cat, ElevCat, NPDESDensCat, HydrlCondCat, PctImp2006Cat, pctUrban2006, pctForest2006, PctCrop2006Cat, pctWetland2006, WetIndexCat, areasqkm, meandused)
   
-pcaTrendIndex <-  mk %>% ungroup() %>% select_if(is.numeric) %>% na.omit() %>% 
+pcaTrendIndex <-  mkSig %>% ungroup() %>% select_if(is.numeric) %>% na.omit() %>% 
   mutate(trendClass = ifelse(sen.slope > 0, 'increasing', 'decrasing'))
 #(trendClass = ifelse(p.value >0.05, 'none', ifelse(p.value <= 0.05 & sen.slope > 0, 'increasing', 'decrasing')))
 
@@ -645,13 +647,14 @@ fviz_pca_ind(pca, geom.ind = "point", pointshape = 21,
              fill.ind = pcaTrendIndex$trendClass,
              col.ind = "black", 
              palette = "jco", 
-             addEllipses = TRUE,
+             #addEllipses = TRUE,
              label = "var",
              col.var = "black",
              repel = TRUE,
              legend.title = "Diagnosis") +
   ggtitle("2D PCA-plot from 30 feature dataset") +
   theme(plot.title = element_text(hjust = 0.5))
+
 get_pca(pca)
 
 fviz_screeplot(pca)
@@ -664,6 +667,13 @@ fviz_contrib(pca, choice = 'var', axes = 2, top = 10)
 ##Slice and dice a la Tamlin
 # Just look at end member lakes (highest and lowest trends 0-5 95-100 percentiles)
 # Look at scatterplots, look for some more complexity.
+## quickly just check out scatterplots
+mkSig %>% select(sen.slope, features) %>% gather(features, key = 'measure', value = 'value') %>%
+  group_by(measure) %>% mutate(value.scaled = scale(value)) %>% ungroup() %>%
+  ggplot(., aes(x = value.scaled, y = sen.slope)) + geom_point() +  geom_smooth(method = 'lm')+ stat_poly_eq(aes(label =  paste(stat(adj.rr.label))),
+               formula = y~x, parse = TRUE, 
+               label.y = Inf, vjust = 1.3)+
+  facet_wrap(~measure, scales = 'free')
 
 ## Quick RF experiment
 library(randomForest)
@@ -676,6 +686,9 @@ tibble(predicted = rf$predicted, actual = rf$y) %>%
 
 mae(rf$predicted, rf$y)
 
+## Quick lm
+lm <- lm(as.formula(paste0('sen.slope~',paste(features, collapse = '+'))), mkSig)
+summary(lm)
 
 
 ```
