@@ -71,7 +71,7 @@ def masking(image):
   # 
   #Create water only mask
 
-  cScore = cScore.reduceRegion(ee.Reducer.sum(),lake.geometry(), 30).get('Cloud')
+  cScore = cScore.reduceRegion(ee.Reducer.mean(),lake.geometry(), 30).get('Cloud')
     
   #Update mask on imagery and add Pekel occurrence band for data export.
   masked = image.addBands(pekel.select('occurrence'))\

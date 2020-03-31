@@ -1,0 +1,416 @@
+---
+title: "99_MnComps"
+author: "Simon Topp"
+date: "3/27/2020"
+output: html_document
+editor_options: 
+  chunk_output_type: console
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## Set up shapefile to pull MN Lakes
+
+```{r}
+# Mess with NHD data
+mnNHDPoly <- st_read('in/MN_LB_Comparison/NHDPlusSR/NHDPLus09/NHDSnapshot/Hydrography/NHDWaterbody.shp') %>% 
+  rbind(st_read('in/MN_LB_Comparison/NHDPlusMS 2/NHDPLus10U/NHDSnapshot/Hydrography/NHDWaterbody.shp')) %>%
+  rbind(st_read('in/MN_LB_Comparison/NHDPlusMS/NHDPLus07/NHDSnapshot/Hydrography/NHDWaterbody.shp')) %>% 
+  rbind(st_read('in/MN_LB_Comparison/NHDPlusGL/NHDPLus04/NHDSnapshot/Hydrography/NHDWaterbody.shp'))
+
+
+## Join NHD Lakes with lakebrowser lakes.
+mnNHD <- mnNHDPoly %>%
+  st_transform(4326) %>% st_centroid() %>% st_join(ecoregs, join = st_within) %>%
+  filter(!is.na(US_L3NAME))
+  filter(FTYPE == 'LakePond' | FTYPE == 'Reservoir',
+         AREASQKM >= .01, ##Make sure they're landsat visible, even with this some aren't
+         AREASQKM < 4000) ##Exclude the Great lakes
+
+LBPreds <- st_read('in/MN_LB_Comparison/lakesmnwq_1975_2008_fill1975-epsg4326/MNWQ_1975_2008_fill1975-epsg4326.shp')
+
+plan(multiprocess)
+centerJoin <- mnNHD %>%
+  split(., c(1:10)) %>%
+  future_map(~st_join(.,LBPreds), .progress = T)
+plan(sequential)
+
+centerJoin <- rbind(centerJoin[[1]], centerJoin[[2]], centerJoin[[3]], centerJoin[[4]], centerJoin[[5]],
+                    centerJoin[[6]], centerJoin[[7]], centerJoin[[8]], centerJoin[[9]], centerJoin[[10]]) %>%
+  filter(!is.na(unmlknum))
+
+### Filter MNPoly to those that overlap with LakeBrowser
+mnOut <- mnNHDPoly %>% filter(COMID %in% centerJoin$COMID) %>% st_zm()
+
+  
+mnOut %>% group_by(FTYPE) %>% summarise(count = n())
+
+## For some reason regional NHD data doesn't have the full suite of attributes
+nhdOut <- st_read('D:/GIS_Data/NHD/nhdPlusV2_WaterBodiesFull.shp') %>%
+  filter(COMID %in% mnOut$COMID) %>%  
+           rename_at(vars(FDATE:LakeArea), tolower) %>%
+  mutate_at(vars(shape_leng, shape_area, meandepth, lakearea), ~format(round(., 3), nsmall = 3)) %>%
+  mutate(lakevolume = format(round(lakevolume, 2), nsmall = 2),
+         COMID = factor(COMID))
+
+st_write(nhdOut, 'in/MN_LB_Comparison/LB_NHDLakes.shp')
+```
+
+## Bring in the MN data
+```{r}
+## Breakdown of MN to look compare against LakeBrowser
+LBPreds <- st_read('in/MN_LB_Comparison/lakesmnwq_1975_2008_fill1975-epsg4326/MNWQ_1975_2008_fill1975-epsg4326.shp')
+
+ecoregs <- st_read('in/MN_LB_Comparison/mn_eco_l3/mn_eco_l3.shp') %>%
+  st_transform(4326)
+
+LBPreds <- LBPreds %>% select(grep('MEAN', names(LBPreds), value = T)) %>%
+  st_centroid() %>%
+  st_join(ecoregs, join = st_nearest_feature)
+
+LBEcoMeans <- LBPreds %>% st_set_geometry(NULL) %>%
+  group_by(US_L3NAME) %>%
+  summarise_at(vars(X1975MEAN:X2008MEAN), mean) %>%
+  gather(X1975MEAN:X2008MEAN, key = 'year', value = 'value') %>%
+  mutate(year = ifelse(year == 'X1975MEAN', 1975,
+                       ifelse(year == 'X1985MEAN', 1985,
+                              ifelse(year == 'X1990MEAN', 1990,
+                                     ifelse(year == 'X1995MEAN', 1995,
+                                            ifelse(year == 'X2000MEAN', 2000,
+                                                   ifelse(year == 'X2005MEAN', 2005,
+                                                          ifelse(year == 'X2008MEAN', 2008,NA))))))),
+         source = 'LB')
+
+
+#Compare GIS layer with manually extracted data
+mnCheck <- read_csv('in/MN_LB_Comparison/LB_EcoAverages.csv') %>%
+  select(Ecoregion, year = Year, value = Clarity.Mean) %>% mutate(source = 'manual') %>%
+  bind_rows(LBEcoMeans %>% select(Ecoregion = US_L3NAME, year, value) %>%
+              mutate(source = 'data'))
+
+ggplot(mnCheck, aes(x = year, y = value, color = source)) + geom_line() + facet_wrap(~Ecoregion) 
+```
+
+## Set up prediction framework
+
+```{r}
+# Load in lakeCat data
+lc.files <- list.files('in/lakeCat/unzip', full.names = T)
+
+# Join lakes to nhd plus LakeCat data
+for(i in lc.files){
+  if(i == first(lc.files)){
+    lc <- read.csv(i) %>% mutate(COMID = factor(COMID))
+    lake.join.mn <- nhdOut %>% st_set_geometry(NULL) %>%
+      mutate(COMID = factor(COMID)) %>%
+      left_join(lc , by = 'COMID')
+    }else{
+    lc <- read.csv(i) %>% mutate(COMID = factor(COMID))%>%
+      select(-c(CatAreaSqKm, WsAreaSqKm, CatPctFull,WsPctFull,inStreamCat))
+    lake.join.mn <- lake.join.mn %>%
+      left_join(lc, by = 'COMID')}
+}
+
+names.in <- names(lake.join.mn)
+## Remove unwanted parameters and munge a couple of date related ones.
+lake.join.mn <- lake.join.mn %>%
+  filter(!is.na(CatAreaSqKm)) %>%  ## 
+  select(-c(grep(names.in, pattern = '*Ws', value = T), 
+            grep(names.in, pattern = '2011Cat', value = T),
+            ## 2011 values aren't representative of the study period
+            grep(names.in, pattern = 'PctFire', value = T), 
+            ## While potentially important, the forest metrics lack 
+            grep(names.in, pattern = 'PctFrstLoss', value = T), 
+            ##the temporal resolution we need.
+            grep(names.in, pattern = 'NABD', value = T), 
+            ##Dam info acts as identifiers and are redundant with lake_type/area
+            grep(names.in, pattern = 'Dam', value = T), 
+            ##Dam info acts as identifiers and are redundant with lake_type/area
+            'Precip08Cat', 'Precip09Cat', 'Tmean08Cat', 'Tmean09Cat'))
+            #Use long term averages not these
+#Round the majority of values to the nearest 1 to avoid variables becoming 'unique ID's)
+round1 <- names(lake.join.mn %>% select(c(CatAreaSqKm:CatPctFull,PctImp2006Cat, PctCarbResidCat:WetIndexCat)))
+
+## Round a few to 10 because they're variation is real big and larger values with 
+#Round a subset to the nearest 10th because their values more or less range from 0 to 1.
+round.1 <- names(lake.join.mn %>% select(c(AgKffactCat, KffactCat, MineDensCat)))
+
+lake.join.mn <- lake.join.mn %>%
+  mutate_at(round1, round, digits = 0) %>%
+  mutate_at(round.1, round, digits = 1)
+
+lake.join.mn[lake.join.mn == -9998] = NA
+
+#write_feather(lake.join.mn, 'out/MN_LB_Comparison/lakeJoinMn.feather')
+lake.join.mn <- read_feather('out/MN_LB_Comparison/lakeJoinMn.feather')
+
+ffsVariables <- read_feather('out/ffsResultsFull.feather')
+features <- ffsVariables[ffsVariables$RMSE == min(ffsVariables$RMSE),] %>%
+  select(-c(nvar, RMSE, SE)) %>%
+  paste(.) %>% .[.!= 'NA']
+
+load('models/FFS_PolyCorr_noLn_Secchi.Rdata')
+
+
+ids <- list.files('lake_data/LB_Lakes') %>% strsplit(split = '.csv', fixed = T) %>% unlist()
+ids <- ids[!ids %in% predicted$COMID]
+paths <- list.files('lake_data/LB_Lakes', full.names = T)
+
+munger <- function(id){
+  df <- read.csv(grep(paste0('/',id,'.csv'),paths, value = T), stringsAsFactors = F) %>%
+  mutate(COMID = as.character(COMID),
+         year = year(date),
+         UniqueID = row_number(),
+         sat = factor(sat, levels = c(5,7,8), labels = c('l5','l7','l8'))) %>%
+  filter(!is.na(blue),
+         dswe == 1,
+         dswe_sd < .4,
+         cScore == 0)
+  return(df)
+}
+
+SR.mn <- ids %>% map_dfr(munger)
+
+df <- SR.mn %>%
+  gather(blue, green, red, nir, key = 'band' , value = 'value') %>%
+  spread(sat, value) %>%
+  group_by(band) %>%
+  nest() %>%
+  #left_join(funcs.8) %>% #From 1_nhd_join_and_munge
+  left_join(funcs.5) %>%
+  mutate(#pred8 = map2(lm8, data, predict),
+         pred5 = map2(lm5, data, predict)) %>%
+  select(-lm5) %>%
+  unnest(c(data, pred5)) %>%
+  select(-l5) %>%
+  rename(l5 = pred5) %>% gather(l5,l7, key = 'sat', value = 'value') %>%
+  spread(band, value) %>%
+  filter(!is.na(blue)) %>%
+  inner_join(lake.join.mn %>% mutate(COMID = as.character(COMID))) %>%
+  distinct(.keep_all = T) %>%
+  mutate(NR = nir/red,
+         BG = blue/green,
+         dWL = fui.hue(red, green, blue),
+         #date = ymd_hms(date),
+         month = as.numeric(month(date)),
+         pctForest2006 = PctDecid2006Cat + PctConif2006Cat + PctMxFst2006Cat,
+         pctUrban2006 = PctUrbMd2006Cat + PctUrbHi2006Cat,
+         pctWetland2006 = PctWdWet2006Cat + PctHbWet2006Cat,
+         areasqkm = round(areasqkm, 1),
+         meandused = round(meandused, 1)) %>%
+  filter(pixelCount > 5) %>%
+  filter_at(vars(blue,green,red,nir,swir1,swir2),all_vars(.>0 & .< 2000))
+
+encoder <- onehot(df %>% select(features))
+lake.input <- predict(encoder, df %>% select(features))
+
+value = tibble(value = predict(model, lake.input))
+
+    
+predicted2 <- df %>%
+  select(system.index, COMID, date, year, month) %>%
+  bind_cols(value) %>%
+  left_join(mnNHD %>% select(COMID, Ecoregion = US_L3NAME) %>% mutate(COMID = factor(COMID)))
+check <- predicted
+predicted <- predicted %>% bind_rows(predicted2)
+## Take another look at how they match up 
+
+predsMN <- predicted %>%
+  filter(year %in% c(1985,1990,1995,2000,2005, 2008),
+         month %in% c(8,9)) %>%
+  group_by(Ecoregion, year, COMID) %>%
+  summarise(value = mean(value, na.rm = T)) %>%
+  group_by(Ecoregion, year) %>%
+  summarise(value = mean(value)) %>%
+  mutate(source = 'RS') %>%
+  bind_rows(mnCheck %>% filter(year %in% c(1985,1990,1995, 2000,2005, 2008)))
+
+ggplot(predsMN, aes(x = year, y = value, color = source)) + 
+  geom_line() + geom_point(alpha = .4) +
+  theme_bw() +
+  scale_color_viridis_d(end = .8, labels = c('LB_Shapefile', 'LB_Website', 'Our Preds')) +
+  facet_wrap(~Ecoregion, nrow = 2) +
+  theme(legend.position = c(.9,.2)) +
+  labs(x = 'Year', y = 'Predicted Secchi (m)', title = 'Lake Browser Timeseries Comparisons')
+
+predsMN %>%
+  spread(source, value) %>%
+  ggplot(.,aes(x = RS, y = data)) + geom_point(aes(color = Ecoregion)) +
+  geom_smooth(method = 'lm', se = F) +
+  geom_abline(color = 'red') + 
+  stat_poly_eq(aes(label =  paste(stat(adj.rr.label))),
+               formula = y~x, parse = TRUE, 
+               label.y = Inf, vjust = 1.3) +
+  labs(x = 'Our Predictions', y = 'LakeBrowser Predictions (Shapefile)', title = 'LakeBrowser Vs Us',subtitle = 'Red line = 1:1, Blue = linear regression') + 
+  theme_bw() # +
+  facet_wrap(~Ecoregion, scales = 'free')
+
+lms <- predsMN %>%
+  group_by(source, Ecoregion) %>%
+  nest() %>%
+  mutate(lm = purrr::map(data, ~lm(value~year,.)),
+         tidy = purrr::map(lm, broom::tidy)) %>%
+  unnest(tidy) %>%
+  select(-lm, -data) %>%
+  filter(term == 'year') %>%
+  mutate(Significant = ifelse(p.value < 0.05, T,F))
+
+p1 <- ggplot(lms %>% filter(source %in% c('RS', 'manual')), aes(x = Ecoregion, y = estimate, color = source)) + 
+  geom_point() +
+  geom_errorbar(aes(ymin = estimate - 2*std.error, ymax = estimate + 2*std.error)) +
+  theme_bw() +
+  theme(axis.text.x = element_blank(),
+        axis.title = element_blank(),)+#element_text(angle = 30, hjust = 1)) + 
+  scale_color_discrete('Source', labels = c('LB_Website', 'Our Preds')) +
+  labs(title = 'Website')
+
+p2 <- ggplot(lms %>% filter(source %in% c('RS', 'data')), aes(x = Ecoregion, y = estimate, color = source)) + 
+  geom_point() +
+  geom_errorbar(aes(ymin = estimate - 2*std.error, ymax = estimate + 2*std.error)) +
+  theme_bw() +
+  theme(axis.text.x = element_text(angle = 20, hjust = 1),
+        axis.title.y = element_blank()) + 
+  scale_color_discrete('Source', labels = c('LB_Shapefile', 'Our Preds')) +
+  labs(title = 'Shapefile')
+
+g <- gridExtra::grid.arrange(p1,p2, nrow = 2, heights = c(.55,1), left = 'Linear Trend (m/y, 95% CI)')
+    
+
+mnWide <- predsMN %>%
+  spread(source, value)
+bias(mnWide$manual, mnWide$RS)
+rmse(mnWide$manual, mnWide$RS)
+mae(mnWide$manual, mnWide$RS)
+```
+
+
+
+
+
+## Initial Comparison Code
+```{r}
+## Check Minnesota to compare against recent pub
+mn <- st_as_sf(maps::map("state", plot = FALSE, fill = TRUE)) %>% filter(ID == 'minnesota')
+
+gplot() +
+  geom_sf(data = mn) +
+  geom_sf(data = mk %>%
+            #filter(sig == T) %>%
+            mutate(trend = ifelse(sen.slope > 0, 'Increasing', 'Decreasing')) %>%
+      st_as_sf(., coords = c('long', 'lat'), crs = 4326) %>%
+      st_intersection(mn),
+      aes(color = trend), alpha = .4) +
+  scale_color_manual(values = c('red', 'blue')) +
+  #   aes(color = sen.slope), alpha = .4) +
+  # scale_color_gradient2(low = 'red', mid = 'grey60', high = 'blue')+
+  ggtitle('Our Minessota Predictions')
+
+summ.meds.AS <- read_feather(paste0('out/TS_Preds/NLA2012_cntr_',iteration,'.feather')) %>% mutate(sample = 'NLA') %>%
+  bind_rows(read_feather(paste0('out/TS_Preds/Over10_',iteration,'.feather')) %>% mutate(sample = 'Over10')) %>%
+  bind_rows(read_feather(paste0('out/TS_Preds/EcoReg2000_cntr_',iteration,'.feather')) %>%
+              mutate(sample = 'Random')) %>%
+  filter(month %in% c(8:9),
+  year < 2019) %>% ##Incomplete obs for 2019 so we won't use it.
+  group_by(COMID, year, region) %>%
+  summarise(secchi.med = median(value))
+
+count.AS <-summ.meds.AS %>% group_by(COMID) %>% summarise(count = n()) %>% filter(count > 25)
+summ.meds.AS <- summ.meds.AS %>% filter(COMID %in% count.AS$COMID)
+
+## Filter it down to just the years they have and run linear reg
+lbTest <- summ.meds.AS %>% filter(year %in% c(1985, 1990, 1995, 2000, 2005, 2008, 2011, 2015)) %>%
+  mutate(secchi.med = secchi.med*100) %>%
+  group_by(COMID, region) %>%
+  arrange(year) %>%
+  nest() %>%
+  mutate(mk = purrr::map(data, ~lm(.$secchi.med ~ .$year)),
+         tidy = purrr::map(mk, tidy)) %>%
+  select(-c(data, mk)) %>%
+  unnest(tidy) %>%
+  left_join(lake.join) %>%
+  mutate(Size.Group = cut(areasqkm, breaks = c(0,1,10,100,2000), labels = c('<1','1-10','10-100','>100'))) %>%
+  filter(!is.na(Size.Group),
+         term == '.$year')
+
+
+lbTestmk <- summ.meds.AS %>% 
+  group_by(COMID, region) %>%
+  arrange(year) %>%
+  nest() %>%
+  mutate(mk = purrr::map(data, ~sens.slope(.$secchi.med)),
+         sen.slope = purrr::map_dbl(mk, 'estimates'),
+         sen.slope = sen.slope*100,
+         p.value = purrr::map_dbl(mk, 'p.value'),
+         sig = ifelse(p.value < .1, T, F)) %>%
+  select(COMID, region, sen.slope, p.value, sig) %>%
+  left_join(lake.join) %>%
+  mutate(Size.Group = cut(areasqkm, breaks = c(0,1,10,100,2000), labels = c('<1','1-10','10-100','>100'))) %>%
+  filter(!is.na(Size.Group))
+
+ggplot() +
+  geom_sf(data = mn) +
+  geom_sf(data = lbTest %>%
+            #filter(sig == T) %>%
+            mutate(trend = ifelse(estimate > 0, 'Increasing', 'Decreasing')) %>%
+      st_as_sf(., coords = c('long', 'lat'), crs = 4326) %>%
+      st_intersection(mn),
+      aes(color = trend), alpha = .4) +
+  scale_color_manual(values = c('red', 'blue')) +
+  # aes(color = estimate), alpha = .4) +
+  # scale_color_gradient2(low = 'red', mid = 'grey60', high = 'blue')+
+  ggtitle('Our Predictions, LakeBrowser Methods')
+
+
+ggplot(lbTest %>% filter(COMID %in% mk$COMID, !is.na(p.value)) %>% mutate(trend = ifelse(estimate > 0, 'Increasing', 'Decreasing'), sig = ifelse(p.value < 0.01, T, F)) %>% st_as_sf(., coords = c('long', 'lat'), crs = 4326) %>% st_intersection(mn), 
+       aes(x = trend, fill = trend)) + geom_bar() +
+       scale_fill_manual(values = c('red', 'blue')) + 
+  labs(alpha = 'Significant (p<0.01)')
+
+ggplot(mk %>% mutate(trend = ifelse(sen.slope > 0, 'Increasing', 'Decreasing')) %>% st_as_sf(., coords = c('long', 'lat'), crs = 4326) %>% st_intersection(mn), 
+       aes(x = trend, fill = trend)) + geom_bar() +
+       scale_fill_manual(values = c('red', 'blue')) +
+  labs(alpha = 'Significant (p<0.01)')
+
+
+#%>% filter(COMID %in% nla.2012$COMID) 
+lake.join <- read_feather('out/NLA2012LakesFull.feather') %>% mutate(sample = 'NLA') %>%
+  bind_rows(read_feather('out/Over10LakesFull.feather') %>% mutate(sample = 'Over10')) %>%
+  bind_rows(read_feather('out/EcoReg2000LakesFull.feather') %>% mutate(sample = 'Random')) %>%
+  distinct(COMID, .keep_all = T)
+
+
+lbTest %>% filter(COMID %in% mk$COMID) %>%
+  select(slope = estimate) %>% mutate(slope = slope*100, source = 'Browser') %>%
+  bind_rows(mk %>% select(slope = sen.slope) %>% mutate(source = 'ManKendall(Ours)')) %>%
+ggplot(., aes(x = slope, fill = source)) + geom_density(alpha = .6)
+
+```
+
+
+## Take a look at our Preds
+```{r}
+Preds.out <- read_feather(paste0('out/TS_Preds/NLA2012_cntr_',iteration,'.feather')) %>% mutate(sample = 'NLA') %>%
+  bind_rows(read_feather(paste0('out/TS_Preds/Over10_',iteration,'.feather')) %>% mutate(sample = 'Over10')) %>%
+  bind_rows(read_feather(paste0('out/TS_Preds/EcoReg2000_cntr_',iteration,'.feather')) %>%
+              mutate(sample = 'Random'))
+
+lake.join.mn <- read_feather('out/NLA2012LakesFull.feather') %>% mutate(sample = 'NLA') %>%
+  bind_rows(read_feather('out/Over10LakesFull.feather') %>% mutate(sample = 'Over10')) %>%
+  bind_rows(read_feather('out/EcoReg2000LakesFull.feather') %>% mutate(sample = 'Random')) %>%
+  distinct(COMID, .keep_all = T) %>%
+  filter(COMID %in% mnNHD$COMID) %>%
+  left_join(., mnNHD %>% as.data.frame(.) %>% select(COMID,US_L3NAME) %>% mutate(COMID = factor(COMID)))
+
+predsMN <- Preds.out %>% inner_join(lake.join.mn) %>%
+  filter(year %in% c(1985,1990,2000,2005, 2008),
+         month %in% c(8,9)) %>%
+  rename(Ecoregion = US_L3NAME) %>%
+  group_by(Ecoregion, year) %>%
+  summarise(value = mean(value, na.rm = T)) %>%
+  mutate(source = 'RS') %>%
+  bind_rows(mnCheck)
+
+ggplot(predsMN, aes(x = year, y = value, color = source)) + geom_line() + facet_wrap(~Ecoregion)
+```

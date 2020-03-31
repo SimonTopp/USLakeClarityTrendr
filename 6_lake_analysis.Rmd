@@ -129,7 +129,7 @@ Preds.out%>%
 
 #Create dataframe of median summer values for each lake plus a mk-test stats
 summ.meds <- Preds.out %>%
-  filter(month %in% c(5:9),
+  filter(month %in% c(5:9), #c(8,9)
          year < 2019) %>% ##Incomplete obs for 2019 so we won't use it.
   group_by(COMID, year, region) %>%
   summarise(secchi.med = median(value))
@@ -195,13 +195,13 @@ summaryMK <- bootstrapped.ts %>%
 
 ## Finally plot up Man-Kendal results
 summaryMK %>%
-  left_join(region) %>%
+  left_join(region %>% st_simplify(dTolerance = 1000)) %>%
   rowwise() %>%
   mutate(coords.x = st_point_on_surface(geometry)[1],
     coords.y = st_point_on_surface(geometry)[2]) %>%
   ungroup() %>%
-  ggplot() +
-    geom_sf(aes(fill = sen.slope)) +
+  ggplot(.) +
+    geom_sf(aes(fill = sen.slope, geometry = geometry)) +
     geom_text(aes(x = coords.x, y = coords.y, label = sig), size = 4, color = 'red') +
     theme(axis.text.x = element_blank(),
           axis.text.y = element_blank(),
@@ -210,7 +210,7 @@ summaryMK %>%
           panel.grid.major = element_line(color = 'transparent'),
           legend.position = 'bottom') +
     scale_color_manual(values = 'red', breaks = 'yes') +
-    scale_fill_viridis_c(option = 'cividis') +
+    scale_fill_gradient2(low='#F56217', mid='#ffffff', high='#0B486B')+
     labs(fill = 'Slope (cm/year)', title = 'MannKendall Slopes') +
     guides(color = guide_legend(label = F))
 
@@ -462,7 +462,6 @@ lake.join <- read_feather('out/NLA2012LakesFull.feather') %>% mutate(sample = 'N
   bind_rows(read_feather('out/EcoReg2000LakesFull.feather') %>% mutate(sample = 'Random')) %>%
   distinct(COMID, .keep_all = T)
 
-
 ##Real Quick look at differences between the samples
 lake.join %>% filter(sample == 'NLA'|sample == 'Random', COMID %in% summ.meds.full$COMID) %>%
   ggplot() + geom_density(aes(x = areasqkm, color = sample)) + scale_x_log10() + facet_wrap(~region)
@@ -542,14 +541,16 @@ summ.meds.full %>%
   geom_point(aes(x = COMID, y = 2020, color = sen.slope)) +
   scale_fill_viridis_c(trans = 'log10')
 
+
+
 ## Just plot up the significant trends of individual lakes ot look at nation wide patterns!
 ggplot() +
   geom_sf(data = region %>% st_simplify(dTolerance = 1000)) +
   geom_sf(data = mk %>%
     filter(sig == T) %>%
-    st_as_sf(., coords = c('long', 'lat'), crs = 4326), 
+    st_as_sf(., coords = c('long', 'lat'), crs = 4326),
     aes(color = sen.slope)) +
-  scale_color_gradient2(low = 'red', mid = 'grey60', high = 'blue')
+  scale_color_gradient2(low = 'red', mid = 'grey60', high = 'blue') 
 
 mk %>% group_by(Size.Group) %>% summarise(mean =mean(sen.slope), median = median(sen.slope))
 
