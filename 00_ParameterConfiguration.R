@@ -35,7 +35,7 @@ library(gridExtra)
 library(Hmisc)
 
 #Parameters
-iteration = 'FFS_PolyCorr_noLn_Secchi'
+iteration = 'gblinear' #'FFS_PolyCorr_noLn_Secchi'
 
 #Set study regions
 region <- st_read('in/NLA/NLA_Ecoregions/EcoRegsMerged.shp')
@@ -75,7 +75,7 @@ if(stage > 1){
     spread(sat, value) %>%
     group_by(band) %>%
     nest() %>%
-    left_join(funcs.8) %>% #From 1_nhd_join_and_munge
+    left_join(funcs.8) %>% #From 1_nhd_join_and_munge line 362
     left_join(funcs.5) %>%
     mutate(pred8 = map2(lm8, data, predict),
            pred5 = map2(lm5, data, predict)) %>%
@@ -132,5 +132,6 @@ if(stage > 4){
 
 if(stage > 5){
   Preds.out <- read_feather(paste0('out/TS_Preds/', lakeSamp, '_',iteration,'.feather'))
-  bootstrapped.ts <- read_feather(paste0('out/TS_Preds/',lakeSamp,'_bootstrapped.feather'))
 }
+
+#bootstrapped.ts <- read_feather(paste0('out/TS_Preds/',lakeSamp,'_bootstrapped.feather'))

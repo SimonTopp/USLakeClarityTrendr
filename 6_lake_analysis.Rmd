@@ -232,7 +232,7 @@ meanFull <- fieldMean %>%
   mutate(source = 'In.Situ', se = NA, bias = NA) %>%
   bind_rows(read_feather('out/TS_Preds/NLA2012_cntr_bootstrapped.feather') %>%
               mutate(source = 'NLA')) %>%
-  bind_rows(read_feather('out/TS_Preds/EcoReg2000_bootstrapped.feather') %>%
+  bind_rows(read_feather('out/TS_Preds/EcoReg2000_cntr_bootstrapped.feather') %>%
               mutate(source = 'Random')) %>% 
   bind_rows(read_feather('out/TS_Preds/Over10_bootstrapped.feather') %>%
               mutate(source = 'Large.Lakes'))
@@ -284,7 +284,8 @@ k <- k+1
 }
 grid::grid.draw(g)
 
-ggsave('figures/NLA_TS_Comp.pdf', width = 5, height = 4.5, plot = g)
+#OG was with EcoReg2000 not EceoReg200_cntr
+ggsave('figures/NLA_TS_Comp.png', width = 5, height = 4.5, plot = g)
 
 FieldMK <- fieldMean %>%
   group_by(region) %>%
@@ -311,7 +312,7 @@ mk.full <- FieldMK %>%
   mutate(source = 'In.Situ') %>%
   bind_rows(read_feather('out/TS_Preds/NLA2012_cntr_summaryMK.feather') %>%
               mutate(source = 'NLA.Sample')) %>%
-  bind_rows(read_feather('out/TS_Preds/EcoReg2000_summaryMK.feather') %>%
+  bind_rows(read_feather('out/TS_Preds/EcoReg2000_cntr_summaryMK.feather') %>%
               mutate(source = 'Random.Sample')) %>%
     bind_rows(read_feather('out/TS_Preds/Over10_summaryMK.feather') %>%
               mutate(source = 'Large.Lakes.Sample')) %>%
@@ -395,7 +396,8 @@ p3 <- trendDif %>% filter(Group == 'NLA.minus.Random' | Group == 'NLA.minus.In.S
 
 g <- grid.arrange(p2, p3, nrow = 2)
 
-ggsave('figures/SlopeCompsV2.pdf',plot = g, width = 6.5, height = 5, units = 'in')
+#OG was with EcoReg2000 not EcoReg2000_cntr
+ggsave('figures/SlopeCompsV2.png',plot = g, width = 6.5, height = 5, units = 'in')
 
 g <- grid.arrange(p1,p2, p3, layout_matrix = rbind(c(1,1,1),c(2,2,3)))
 
@@ -477,7 +479,7 @@ counts <- summ.meds.full %>%
 
 summ.meds.full <- summ.meds.full %>% filter(COMID %in% counts$COMID)
 
-summ.meds.full %>% mutate(Period = ifelse(year < 1999, '1984-1989', ifelse(year > 2012, '2013-2018', NA))) %>% filter(!is.na(Period)) %>% mutate(Period = factor(Period)) %>%
+ summ.meds.full %>% mutate(Period = ifelse(year < 1999, '1984-1989', ifelse(year > 2012, '2013-2018', NA))) %>% filter(!is.na(Period)) %>% mutate(Period = factor(Period)) %>%
   left_join(lake.join) %>%
   mutate(Size.Group = cut(areasqkm, breaks = c(0,1,10,100,2000), labels = c('<1','1-10', '10-100', '>100'))) %>%
   ggplot(aes(x = secchi.med)) + geom_density(aes(fill = Size.Group), alpha = .4) + scale_fill_viridis_d(end = .8) + theme_bw() +

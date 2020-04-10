@@ -5,39 +5,9 @@ date: "11/8/2019"
 output: html_document
 ---
 
-
 #Attempt at FFS Using xgboost and spatial cross validation.
 
 ```{r}
-## Do some final munging/feature engineering
-# srMunged <- read_feather('out/srMunged.feather') %>%
-#   filter(parameter == 'secchi',
-#          value <= 10,
-#          !is.na(CatAreaSqKm)) %>% #100 obs that didn't match up with LakeCat
-#   mutate(COMID = as.character(COMID),
-#          pctForest2006 = PctDecid2006Cat + PctConif2006Cat + PctMxFst2006Cat,
-#          pctUrban2006 = PctUrbMd2006Cat + PctUrbHi2006Cat,
-#          pctWetland2006 = PctWdWet2006Cat + PctHbWet2006Cat,
-#          areasqkm = round(areasqkm, 1),
-#          meandused = round(meandused, 1),
-#          inStreamCat = as.numeric(inStreamCat),
-#          #Correct the reflectance values based on distribution comparisons (see line 358 in 1_nhd_join_and_munge.Rmd)
-#          blue = ifelse(sat == '5', blue - .84, ifelse(sat == '8', blue + 76.3, blue)),
-#          green = ifelse(sat == '5', green - 29.2, ifelse(sat == '8', green + 46.9, green)),
-#          nir = ifelse(sat == '5', nir - 34.3, ifelse(sat == '8', nir + 127, nir)),
-#          red = ifelse(sat == '5', red - 26.1, ifelse(sat == '8', red + 51.5, red)),
-#          NR = nir/red,
-#          BG = blue/green,
-#          dWL = fui.hue(red, green, blue)) %>%
-#   filter_at(vars(nir, red, blue, green), all_vars(.>0 & .<2000)) %>%
-#   rowwise() %>%
-#   mutate(saturation = rgb2hsv(r=red, g=green, b=blue, maxColorValue = 2000)[2],
-#          brightness = rgb2hsv(r=red,g= green, b= blue, maxColorValue = 2000)[3]) %>%
-#   ungroup()
-
-
-
-
 ## Select parameters to go into model
 paste0(names(srMunged), collapse = ', ')
 
@@ -148,30 +118,84 @@ xgb_base <- caret::train(
 )
 ```
 
-# Grid Search for Hyperparameters
+# Grid search for GBLinear
+
+```{r}
+## Get resonable nrounds for default learning rate
+grid_default <- expand.grid(
+  nrounds = seq(100,300,100),
+  alpha = c(.1,.5,1), #Best was lambda = 1, alpha = .5, eta = .1
+  lambda = c(.1,.5,1),
+  eta = c(.1, 0.3)
+)
+
+#Set up a cluster to run everything in parrallel
+cl <- makePSOCKcluster(availableCores()-1)
+registerDoParallel(cl)
+
+train_control <- caret::trainControl(method="cv", savePredictions = F, 
+                          returnResamp = 'final', index = folds$index, 
+                          indexOut = folds$indexOut, verboseIter = T)
+
+base_model <- caret::train(
+  x = df.encoded,
+  y = df$value,
+  trControl = train_control,
+  tuneGrid = grid_default,
+  method = "xgbLinear",
+  preProcess = c('center', 'scale'),
+  importance = F,
+  verbose = TRUE
+)
+
+
+base_model$bestTune
+
+## Build final model with best tune
+
+train_control1 <- caret::trainControl(method="cv", savePredictions = T, 
+                          returnResamp = 'final', index = folds$index, 
+                          indexOut = folds$indexOut, verboseIter = T)
+
+grid_train <- expand.grid(
+  nrounds = base_model$bestTune$nrounds,
+  alpha = base_model$bestTune$alpha,
+  lambda = base_model$bestTune$lambda,
+  eta = base_model$bestTune$eta
+)
+
+
+model <- caret::train(
+  x = df.encoded,
+  y = df$value,
+  trControl = train_control1,
+  tuneGrid = grid_train,
+  method = "xgbLinear",
+  preProcess = c('center', 'scale'),
+  importance = T,
+  verbose = TRUE
+)
+
+stopCluster(cl)
+
+## Now look at holdout data
+
+holdout_x <- predict(oneHot, holdOut %>% select(features))
+
+holdout_y <- holdOut$value
+
+
+output <- tibble(Actual = holdout_y, Predicted = predict(model, holdout_x), log = 'none', UniqueID = holdOut$UniqueID)
+
+save(model, file = paste0('models/',iteration, '.Rdata'))
+write_feather(output, paste0('out/outputs/',iteration, '.feather'))
+```
+
+
+# Grid Search for Hyperparameters with gbTree
 
 ```{r First tune, warning=FALSE, fig.height=7}
-# Next, we build tuning grid for `caret` to explore between different
-# hyperparameter values. To get started we're using some suggestions from
-# [here](https://www.slideshare.net/OwenZhang2/tips-for-data-science-competitions/14).
-# 
-# ## Step 1: Number of Iterations and the Learning Rate
-# 
-# We going to start the tuning "the bigger knobs" by setting up the maximum
-# number of trees:
-
-# note to start nrounds from 200, as smaller learning rates result in errors so
-# big with lower starting points that they'll mess the scales
-
-
-# To get reasonable running time while testing hyperparameter combinations
-# with `caret` we don't want to go over `r nrounds`. Then, we want to find a good enough learning rate for this number of trees,
-# as for lower learning rates `r nrounds` iterations might not be enough.
-# 
-# Next, as the maximum tree depth is also depending on the number of iterations
-# and the learning rate, we want to experiment with it at this point to narrow
-# down the possible hyperparameters. We'll also create a helper function to 
-# create the visualizations with `ggplot2`, called `tuneplot()`:
+# Base model
 
 nrounds <- 1000
 
@@ -211,24 +235,8 @@ tuneplot <- function(x, probs = .90) {
 
 tuneplot(xgb_tune)
 xgb_tune$bestTune
-```
 
-
-```{r second tune, warning=FALSE, fig.height=5}
-
-# With `r nrounds` iterations a learning rate of `r xgb_tune$bestTune$eta`
-# seems to be a good starting point. The model currently has a cross-validated
-# RMSE of `r round(min(xgb_tune$results$RMSE), digits = 5)`. Also to be noted 
-# that with `max_depth = 2` and smaller learning rates the forest seems not yet
-# stabile.
-# 
-# ## Step 2: Maximum Depth and Minimum Child Weight
-# 
-# After fixing the learning rate to `r xgb_tune$bestTune$eta` and we'll also
-# set maximum depth to `r xgb_tune$bestTune$max_depth` +-1 (or +2 if 
-# `max_depth == 2`) to experiment a bit around the suggested best tune in
-# previous step. Then, well fix maximum depth and minimum child weight:
-
+#  Step 2: Maximum Depth and Minimum Child Weight
 
 tune_grid2 <- expand.grid(
   nrounds = seq(from = 50, to = nrounds, by = 50),
@@ -253,18 +261,8 @@ xgb_tune2 <- caret::train(
 
 tuneplot(xgb_tune2)
 xgb_tune2$bestTune
-```
 
-
-```{r third tune, warning=FALSE, fig.height=5}
-# The second tune results RMSE of `r round(min(xgb_tune2$results$RMSE), digits=5)`,
-# `r glue("{round((min(xgb_tune$results$RMSE)/min(xgb_tune2$results$RMSE) - 1)*100, digits=2)}%")`
-# over the previous step.
-# 
-# ## Step 3: Column and Row Sampling
-# Based on this, we can fix minimum child weight to `r xgb_tune2$bestTune$min_child_weight`
-# and maximum depth to `r xgb_tune2$bestTune$max_depth`. Next, we'll try
-# different values for row and column sampling:
+# Step 3: Column and Row Sampling
 
 tune_grid3 <- expand.grid(
   nrounds = seq(from = 50, to = nrounds, by = 50),
@@ -287,20 +285,8 @@ xgb_tune3 <- caret::train(
 
 tuneplot(xgb_tune3, probs = .95)
 xgb_tune3$bestTune
-```
 
-```{r fourth tune, warning=FALSE, fig.height=5}
-
-# Based on the above, we can set column sampling to `r xgb_tune3$bestTune$colsample_bytree`
-# and row sampling to `r xgb_tune3$bestTune$subsample`. RMSE at this point is `r round(min(xgb_tune3$results$RMSE), digits=5)`, which is
-# `r glue("{round((min(xgb_tune2$results$RMSE)/min(xgb_tune3$results$RMSE)-1) * 100, digits=2)}%")`
-# better than RMSE in step 2.
-# 
-# ## Step 4: Gamma
-# Next, we again pick the best values from previous step, and now will see 
-# whether changing the gamma has any effect on the model fit:
-# 
-
+# Step 4: Gamma
 
 tune_grid4 <- expand.grid(
   nrounds = seq(from = 50, to = nrounds, by = 50),
@@ -323,18 +309,8 @@ xgb_tune4 <- caret::train(
 
 tuneplot(xgb_tune4)
 xgb_tune4$bestTune
-```
 
-
-```{r fifth tune, warning=FALSE}
-# After the inspection, we can set the gamma to `r xgb_tune4$bestTune$gamma`. 
-# RMSE of this model is `r round(min(xgb_tune4$results$RMSE), digits=5)`
-# `r if(xgb_tune4$bestTune$gamma!=0){glue("which is {round((min(xgb_tune3$results$RMSE)/min(xgb_tune4$results$RMSE)-1)*100, digits=2)}% improvement.")}else{"."}`
-#
 # ## Step 5: Reducing the Learning Rate
-# 
-# Now, we have tuned the hyperparameters and can start reducing the learning
-# rate to get to the final model:
 
 tune_grid5 <- expand.grid(
   nrounds = seq(from = 100, to = 1000, by = 50),
@@ -357,24 +333,8 @@ xgb_tune5 <- caret::train(
 
 tuneplot(xgb_tune5)
 xgb_tune5$bestTune
-```
 
-
-```{r final model, comment=NA}
-
-# These will be the hyperparameters for the final model. RMSE now sets to 
-# `r round(min(xgb_tune5$results$RMSE), digits=5)`, resulting in improvement of
-# `r glue("{round((min(xgb_tune4$results$RMSE)/min(xgb_tune5$results$RMSE)-1)*100, digits=2)}%")`
-# over the step 4, which in total is
-# `r glue("{round((min(xgb_tune$results$RMSE)/min(xgb_tune5$results$RMSE)-1)*100, digits=2)}%")`
-# better than the first tune.
-# 
 # ## Fitting the Model
-# 
-# Now that we have determined the parameters we want to use, we will use the
-# training data (excluding the hold-out set which we will soon use to measure
-# the model performance) without resampling to fit the model:
-
 
 (final_grid <- expand.grid(
   nrounds = xgb_tune5$bestTune$nrounds,
@@ -386,8 +346,6 @@ xgb_tune5$bestTune
   subsample = xgb_tune5$bestTune$subsample
 ))
 
-# cl <- makePSOCKcluster(6)
-# registerDoParallel(cl)
 
 (model <- caret::train(
   x = df.encoded,
@@ -403,30 +361,11 @@ stopCluster(cl)
 
 
 ```{r hold-out RMSE}
-
-# Note, that this model is not trained with whole training set yet which we will
-# still do before submitting the predictions.
-# 
-# # Evaluating the Model Performance
-# 
-# Now we will evaluate the model performance by:
-# 
-#  - Testing the performance of the two baseline models and the final model with the hold-out data
-#  - Submitting predictions to Kaggle from default hyperparameter XGBoost plus the tuned one 
-#  - Testing whether taking the hold-out set had any effect on the cross-validated RMSE
-#   
-# ## With the Hold-out Set
-# 
-# By testing the performance with the hold-out set, we can see the effects that 
-# the tuning had over the two baseline models: 
-
 holdout_x <- predict(oneHot, holdOut %>% select(features))
 
 holdout_y <- holdOut$value
 
-if(log == T){
-output <- tibble(Actual = exp(holdout_y), Predicted = exp(predict(model, holdout_x)), log = 'ln', UniqueID = holdOut$UniqueID)
-}else{output <- tibble(Actual = holdout_y, Predicted = predict(model, holdout_x), log = 'none', UniqueID = holdOut$UniqueID)}
+output <- tibble(Actual = holdout_y, Predicted = predict(model, holdout_x), log = 'none', UniqueID = holdOut$UniqueID)
 
 save(model, file = paste0('models/',iteration, '.Rdata'))
 write_feather(output, paste0('out/outputs/',iteration, '.feather'))

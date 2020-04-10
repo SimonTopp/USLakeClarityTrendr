@@ -55,7 +55,8 @@ nhdOut <- st_read('D:/GIS_Data/NHD/nhdPlusV2_WaterBodiesFull.shp') %>%
   mutate(lakevolume = format(round(lakevolume, 2), nsmall = 2),
          COMID = factor(COMID))
 
-st_write(nhdOut, 'in/MN_LB_Comparison/LB_NHDLakes.shp')
+#st_write(nhdOut, 'in/MN_LB_Comparison/LB_NHDLakes.shp')
+nhdOut <- st_read('in/MN_LB_Comparison/LB_NHDLakes.shp')
 ```
 
 ## Bring in the MN data
@@ -69,19 +70,23 @@ ecoregs <- st_read('in/MN_LB_Comparison/mn_eco_l3/mn_eco_l3.shp') %>%
 LBPreds <- LBPreds %>% select(grep('MEAN', names(LBPreds), value = T)) %>%
   st_centroid() %>%
   st_join(ecoregs, join = st_nearest_feature)
+LBPreds <- LBPreds %>% st_set_geometry(NULL)
+LBPreds[LBPreds == 0] = NA
 
-LBEcoMeans <- LBPreds %>% st_set_geometry(NULL) %>%
-  group_by(US_L3NAME) %>%
-  summarise_at(vars(X1975MEAN:X2008MEAN), mean) %>%
+LBEcoMeans <-LBPreds %>%
+  select(X1975MEAN:X2008MEAN, US_L3NAME) %>%
   gather(X1975MEAN:X2008MEAN, key = 'year', value = 'value') %>%
+  filter(value != 0) %>%
   mutate(year = ifelse(year == 'X1975MEAN', 1975,
                        ifelse(year == 'X1985MEAN', 1985,
                               ifelse(year == 'X1990MEAN', 1990,
                                      ifelse(year == 'X1995MEAN', 1995,
                                             ifelse(year == 'X2000MEAN', 2000,
                                                    ifelse(year == 'X2005MEAN', 2005,
-                                                          ifelse(year == 'X2008MEAN', 2008,NA))))))),
-         source = 'LB')
+                                                          ifelse(year == 'X2008MEAN', 2008,NA))))))), 
+         source = 'LB') %>%
+  group_by(US_L3NAME, year, source) %>%
+  summarise(value = mean(value))
 
 
 #Compare GIS layer with manually extracted data
@@ -155,7 +160,7 @@ load('models/FFS_PolyCorr_noLn_Secchi.Rdata')
 
 
 ids <- list.files('lake_data/LB_Lakes') %>% strsplit(split = '.csv', fixed = T) %>% unlist()
-ids <- ids[!ids %in% predicted$COMID]
+#ids <- ids[!ids %in% predicted$COMID]
 paths <- list.files('lake_data/LB_Lakes', full.names = T)
 
 munger <- function(id){
@@ -209,12 +214,13 @@ lake.input <- predict(encoder, df %>% select(features))
 value = tibble(value = predict(model, lake.input))
 
     
-predicted2 <- df %>%
+predicted <- df %>%
   select(system.index, COMID, date, year, month) %>%
   bind_cols(value) %>%
   left_join(mnNHD %>% select(COMID, Ecoregion = US_L3NAME) %>% mutate(COMID = factor(COMID)))
-check <- predicted
-predicted <- predicted %>% bind_rows(predicted2)
+
+#write_feather(predicted %>% select(-geometry), 'out/MN_LB_Comparison/srPreds.feather')
+predicted <- read_feather('out/MN_LB_Comparison/srPreds.feather')
 ## Take another look at how they match up 
 
 predsMN <- predicted %>%
@@ -235,6 +241,8 @@ ggplot(predsMN, aes(x = year, y = value, color = source)) +
   theme(legend.position = c(.9,.2)) +
   labs(x = 'Year', y = 'Predicted Secchi (m)', title = 'Lake Browser Timeseries Comparisons')
 
+ggsave('figures/__MN_TS_Comps.png', width = 5, height = 4, units = 'in')
+
 predsMN %>%
   spread(source, value) %>%
   ggplot(.,aes(x = RS, y = data)) + geom_point(aes(color = Ecoregion)) +
@@ -244,8 +252,8 @@ predsMN %>%
                formula = y~x, parse = TRUE, 
                label.y = Inf, vjust = 1.3) +
   labs(x = 'Our Predictions', y = 'LakeBrowser Predictions (Shapefile)', title = 'LakeBrowser Vs Us',subtitle = 'Red line = 1:1, Blue = linear regression') + 
-  theme_bw() # +
-  facet_wrap(~Ecoregion, scales = 'free')
+  theme_bw() 
+ggsave('figures/__MN_OverallComps.png', width = 4, height = 3, units = 'in')
 
 lms <- predsMN %>%
   group_by(source, Ecoregion) %>%
@@ -257,25 +265,26 @@ lms <- predsMN %>%
   filter(term == 'year') %>%
   mutate(Significant = ifelse(p.value < 0.05, T,F))
 
-p1 <- ggplot(lms %>% filter(source %in% c('RS', 'manual')), aes(x = Ecoregion, y = estimate, color = source)) + 
+ggplot(lms %>% filter(source %in% c('RS', 'manual')), aes(x = Ecoregion, y = estimate, color = source)) + 
   geom_point() +
   geom_errorbar(aes(ymin = estimate - 2*std.error, ymax = estimate + 2*std.error)) +
   theme_bw() +
-  theme(axis.text.x = element_blank(),
-        axis.title = element_blank(),)+#element_text(angle = 30, hjust = 1)) + 
-  scale_color_discrete('Source', labels = c('LB_Website', 'Our Preds')) +
-  labs(title = 'Website')
-
-p2 <- ggplot(lms %>% filter(source %in% c('RS', 'data')), aes(x = Ecoregion, y = estimate, color = source)) + 
-  geom_point() +
-  geom_errorbar(aes(ymin = estimate - 2*std.error, ymax = estimate + 2*std.error)) +
-  theme_bw() +
-  theme(axis.text.x = element_text(angle = 20, hjust = 1),
-        axis.title.y = element_blank()) + 
+ theme(axis.text.x = element_text(angle = 20, hjust = 1)) + 
   scale_color_discrete('Source', labels = c('LB_Shapefile', 'Our Preds')) +
-  labs(title = 'Shapefile')
+  labs(title = 'Comparison of overall trends', x = 'Ecoregion', y = 'Linear Trend (m/y, 95% CI)')
 
-g <- gridExtra::grid.arrange(p1,p2, nrow = 2, heights = c(.55,1), left = 'Linear Trend (m/y, 95% CI)')
+ggsave('figures/__MN_TrendComps.png', width = 4.5, height = 3, units = 'in')
+
+# p2 <- ggplot(lms %>% filter(source %in% c('RS', 'data')), aes(x = Ecoregion, y = estimate, color = source)) + 
+#   geom_point() +
+#   geom_errorbar(aes(ymin = estimate - 2*std.error, ymax = estimate + 2*std.error)) +
+#   theme_bw() +
+#   theme(axis.text.x = element_text(angle = 20, hjust = 1),
+#         axis.title.y = element_blank()) + 
+#   scale_color_discrete('Source', labels = c('LB_Shapefile', 'Our Preds')) +
+#   labs(title = 'Shapefile')
+# 
+# g <- gridExtra::grid.arrange(p1,p2, nrow = 2, heights = c(.55,1), left = 'Linear Trend (m/y, 95% CI)')
     
 
 mnWide <- predsMN %>%
@@ -287,9 +296,150 @@ mae(mnWide$manual, mnWide$RS)
 
 
 
-
-
 ## Initial Comparison Code
+```{r}
+##Compare whole lake to lake center
+center <- read_feather(paste0('out/TS_Preds/NLA2012_cntr_',iteration,'.feather')) %>% mutate(sample = 'NLA') %>%
+  bind_rows(read_feather(paste0('out/TS_Preds/Over10_',iteration,'.feather')) %>% mutate(sample = 'Over10')) %>%
+  bind_rows(read_feather(paste0('out/TS_Preds/EcoReg2000_cntr_',iteration,'.feather')) %>%
+              mutate(sample = 'Random')) %>%
+  filter(month %in% c(8:9))
+
+centerComps <- center[,c('COMID', 'date', 'value')] %>% rename(center = value) %>% left_join(predicted[,c('COMID', 'date', 'value')] %>% rename(wholeLake = value)) %>% na.omit()
+
+ggplot(centerComps, aes(x = center, y = wholeLake)) + 
+  geom_hex() + scale_fill_viridis_c() +theme_bw() + 
+  labs(x = 'Center Estimate', y = 'Whole Lake Estimate', title = 'Center Pixel vs. Whole Lake Comparison', subtitle = '(red line is 1:1)') + 
+  geom_abline(color = 'red') +
+  stat_poly_eq(aes(label =  paste(stat(adj.rr.label))),
+               formula = y~x, parse = TRUE, 
+               label.y = Inf, vjust = 1.3)
+
+## Compare individual preds against each other.
+sum.means <- predicted %>%
+  select(-geometry) %>%
+  filter(month %in% c(8,9)) %>%
+  group_by(COMID, year) %>%
+  summarise(Topp.mean = mean(value))
+
+
+LBPreds <- st_read('in/MN_LB_Comparison/lakesmnwq_1975_2008_fill1975-epsg4326/MNWQ_1975_2008_fill1975-epsg4326.shp')
+
+LBPreds <- LBPreds %>% select(grep('MEAN', names(LBPreds), value = T)) %>%
+  st_centroid() %>%
+  st_join(ecoregs, join = st_nearest_feature)
+
+plan(multiprocess)
+centerJoin <- nhdOut %>% st_transform(crs = 4326) %>%
+  split(., c(1:10)) %>%
+  future_map(~st_join(.,LBPreds), .progress = T)
+plan(sequential)
+
+centerJoin <- rbind(centerJoin[[1]], centerJoin[[2]], centerJoin[[3]], centerJoin[[4]], centerJoin[[5]],
+                    centerJoin[[6]], centerJoin[[7]], centerJoin[[8]], centerJoin[[9]], centerJoin[[10]])
+
+
+LBjoin <- centerJoin %>% select(COMID,grep('MEAN', names(LBPreds), value = T)) %>%
+  st_set_geometry(NULL) %>%
+  gather(X1975MEAN:X2008MEAN, key = 'year', value = 'LB.mean') %>%
+  mutate(year = ifelse(year == 'X1975MEAN', 1975,
+                       ifelse(year == 'X1985MEAN', 1985,
+                              ifelse(year == 'X1990MEAN', 1990,
+                                     ifelse(year == 'X1995MEAN', 1995,
+                                            ifelse(year == 'X2000MEAN', 2000,
+                                                   ifelse(year == 'X2005MEAN', 2005,
+                                                          ifelse(year == 'X2008MEAN', 2008,NA))))))),
+         COMID = factor(COMID)) %>%
+  filter(LB.mean != 0)
+  
+  
+obs.join <- sum.means %>% left_join(LBjoin)
+
+ggplot(obs.join, aes(x = LB.mean, y = Topp.mean)) + geom_hex() + 
+  scale_fill_viridis_c() +theme_bw() + 
+  #labs(x = 'Center Estimate', y = 'Whole Lake Estimate', title = 'Center Pixel vs. Whole Lake Comparison', subtitle = '(red line is 1:1)') + 
+  geom_abline(color = 'red') +
+  stat_poly_eq(aes(label =  paste(stat(adj.rr.label))),
+               formula = y~x, parse = TRUE, 
+               label.y = Inf, vjust = 1.3) +
+  coord_cartesian(xlim = c(0,10), ylim = c(0,10)) +
+  facet_wrap(~year) + 
+  ggtitle("Lake Based Comparison of Clarity Estimation")
+
+  ggsave('figures/__MN_LakeBasedComps.png', width = 5, height =3.5, units = 'in')
+
+yearlyMetrics <- obs.join %>%
+  na.omit() %>%
+  group_by(year) %>%
+  summarise(bias = Metrics::bias(LB.mean, Topp.mean),
+            mae = mae(LB.mean, Topp.mean))
+yearlyMetrics %>% kable() %>% kable_styling()
+
+## See what in situ data we've got in AquaSat
+check <- srMunged %>% filter(COMID %in% LBjoin$COMID, 
+                             month %in% c(8,9),
+                             year %in% c(1985,1990,1995,2000,2005,2008)) %>%
+  select(COMID, date, year, value) %>%
+  group_by(COMID, year) %>%
+  summarise(field = mean(value))
+
+fieldCheck <- check %>% inner_join(obs.join)
+
+p1 <- fieldCheck %>% ggplot(., aes(x = LB.mean, y = field))  + geom_hex() + 
+  facet_wrap(~year) +
+  scale_fill_viridis_c(trans = 'log10') +
+  stat_poly_eq(aes(label =  paste(stat(adj.rr.label))),
+               formula = y~x, parse = TRUE, 
+               label.y = Inf, vjust = 1.3) +
+  geom_abline(color = 'red') +
+  #coord_cartesian(xlim = c(0,10), ylim = c(0,10)) + 
+  ggtitle('LakeBrowser')  
+
+p2 <- fieldCheck %>% ggplot(., aes(x = Topp.mean, y = field)) + geom_hex() + 
+  facet_wrap(~year) +
+  scale_fill_viridis_c(trans = 'log10') +
+  stat_poly_eq(aes(label =  paste(stat(adj.rr.label))),
+               formula = y~x, parse = TRUE, 
+               label.y = Inf, vjust = 1.3) +
+  geom_abline(color = 'red') +
+  #coord_cartesian(xlim = c(0,10), ylim = c(0,10)) +
+  ggtitle('Our Preds')
+
+g <- grid.arrange(p1,p2, nrow = 2)
+
+ggsave('figures/__LBCompFieldVal.png', plot = g, width = 5, height = 8)
+
+p3 <-fieldCheck %>%
+  na.omit() %>%
+  group_by(year) %>%
+  summarise(Field.Topp =round(bias(field, Topp.mean),3),
+            Field.LB= round(bias(field, LB.mean),3))%>%
+            #pbiasTopp = Metrics::percent_bias(field, Topp.mean),
+            #pbiasLB= percent_bias(field, LB.mean)) %>%
+  gather(Field.Topp:Field.LB, key = 'Source', value = 'Bias') %>%
+  ggplot(., aes(x = year, y = Bias, color = Source)) + geom_point() + geom_line() +
+  theme_bw() + ggtitle('LB Bias Comp (Mean Summer Preds vs AS Field Means)')
+
+
+mn <- st_as_sf(maps::map("state", plot = FALSE, fill = TRUE)) %>% filter(ID == 'minnesota')
+
+p4 <- output.full %>% st_as_sf(coords = c('long', 'lat'), crs = 4326) %>% 
+  st_join(mn) %>% select(-geometry) %>% filter(!is.na(ID)) %>%
+  group_by(year) %>% summarise(bias = bias(Actual, Predicted)) %>% ggplot(aes(x = year, y = bias)) + geom_point() + geom_line() + geom_smooth(method = 'lm') +
+  theme_bw() + ggtitle('MN Model Validation Bias (Observation Based)') +
+  ggpubr::stat_regline_equation(label.x.npc = 'middle', label.y.npc  = 'top')
+
+p5 <- output.full %>% group_by(year) %>% summarise(bias = bias(Actual, Predicted)) %>% ggplot(aes(x = year, y = bias)) + geom_point() + geom_line() + geom_smooth(method = 'lm') +
+  theme_bw() + ggtitle('Overall Model Validation Bias (Observation Based)') +
+  ggpubr::stat_regline_equation(label.x.npc = 'middle', label.y.npc  = 'top')
+
+g <- grid.arrange(p3, p4, p5)
+
+ggsave('figures/__LBCompBiasComp.png', plot = g, width = 4, height = 5)
+
+```
+
+
 ```{r}
 ## Check Minnesota to compare against recent pub
 mn <- st_as_sf(maps::map("state", plot = FALSE, fill = TRUE)) %>% filter(ID == 'minnesota')

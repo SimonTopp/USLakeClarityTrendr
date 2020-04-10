@@ -82,7 +82,7 @@ features <- ffsVariables[ffsVariables$RMSE == min(ffsVariables$RMSE),] %>%
   select(-c(nvar, RMSE, SE)) %>%
   paste(.) %>% .[.!= 'NA']
 
-plan(multiprocess(workers = availableCores()/2))
+plan(multiprocess(workers = availableCores()-1))
 
 Preds.out <-  ids %>% future_map_dfr(~EvalPreds(id = .,paths = lakesDown, lakesUp = lake.join, log = log, model = model, features = features, lakeSamp = lakeSamp), .progress = T)
 
