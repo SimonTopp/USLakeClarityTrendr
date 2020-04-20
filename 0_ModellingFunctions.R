@@ -1,4 +1,4 @@
-## Function for dividing data up 60/40 into train/test data
+
 ## Function for mapping over evaluation lakes data and generating predictions
 EvalPreds <- function(id, paths, lakesUp, log, model, features, lakeSamp){
 
@@ -82,26 +82,6 @@ EvalPreds <- function(id, paths, lakesUp, log, model, features, lakeSamp){
       filter(pixelCount > 5) %>%
       filter_at(vars(blue,green,red,nir,swir1,swir2),all_vars(.>0 & .< 2000))
 
-    #pix.cut <- max(df$pixelCount)/2  ##Filter any observation that doesn't capture at least 1/3 of the lake.
-    # df <- df %>%
-    #   mutate(blue = ifelse(sat == '5', blue - .84, ifelse(sat == '8', blue + 76.3, blue)),
-    #          green = ifelse(sat == '5', green - 29.2, ifelse(sat == '8', green + 46.9, green)),
-    #          nir = ifelse(sat == '5', nir - 34.3, ifelse(sat == '8', nir + 127, nir)),
-    #          red = ifelse(sat == '5', red - 26.1, ifelse(sat == '8', red + 51.5, red)),
-    #          NR = nir/red,
-    #          BG = blue/green,
-    #          dWL = fui.hue(red, green, blue),
-    #          sat = factor(sat, levels = c('5','7','8')),
-    #          #date = ymd_hms(date),
-    #          month = as.numeric(month(date)),
-    #          pctForest2006 = PctDecid2006Cat + PctConif2006Cat + PctMxFst2006Cat,
-    #          pctUrban2006 = PctUrbMd2006Cat + PctUrbHi2006Cat,
-    #          pctWetland2006 = PctWdWet2006Cat + PctHbWet2006Cat,
-    #          areasqkm = round(areasqkm, 1),
-    #          meandused = round(meandused, 1)) %>%
-    #   filter(pixelCount > pix.cut) %>%
-    #   filter_at(vars(blue,green,red,nir,swir1,swir2),all_vars(.>0 & .< 2000))
-
 
     if('AOD' %in% features){
       if(lakeSamp == 'NLA'){
@@ -114,7 +94,6 @@ EvalPreds <- function(id, paths, lakesUp, log, model, features, lakeSamp){
         left_join(lut)
       }
     }
-    
     
     encoder <- onehot(df %>% select(features))
     lake.input <- predict(encoder, df %>% select(features))

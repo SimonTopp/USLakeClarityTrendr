@@ -76,8 +76,9 @@ reg.Join <- sites.sf %>%
 plan(sequential)
 
 ## For some reason map_dfr and row_bind don't play well with spatial data so join them the clunky way.
-reg.Join <- rbind(reg.Join[[1]], reg.Join[[2]], reg.Join[[3]], reg.Join[[4]], reg.Join[[5]], reg.Join[[6]],
-               reg.Join[[7]], reg.Join[[8]], reg.Join[[9]], reg.Join[[10]])
+reg.Join <- rbind(reg.Join[[1]], reg.Join[[2]], reg.Join[[3]], reg.Join[[4]], 
+                  reg.Join[[5]], reg.Join[[6]],reg.Join[[7]], reg.Join[[8]], 
+                  reg.Join[[9]], reg.Join[[10]])
 
 ## Load in nhd lake data downlowded from, http://www.horizon-systems.com/NHDPlus/V2NationalData.php
 nhdLakes <- st_read('D:/GIS_Data/NHD/nhdPlusV2_WaterBodiesFull.shp') %>%
@@ -361,7 +362,6 @@ ggsave('figures/MungedOverpasses.png', width = 6, height = 5, units = 'in', dpi 
 
 ```{r}
 ## Finally, we need to standardize our reflectance values.  To do so we'll use the entire stack of images from the NLA and standardize reflectance values between the percentiles of distributions for each satellite during their coincident overpass period.
-
 files <- list.files('lake_data/NLA2012_cntr/', full.names = T)
 
 refCompPre <- purrr::map_dfr(files, read.csv, stringsAsFactors = F) %>%
@@ -388,7 +388,7 @@ lm8 <- function(band, x){
                l8 = quantile(x %>% filter(sat == 'l8') %>% .[,band], 
                              seq(.01,.99, .01)))
   lm <- lm(l7~poly(l8, 2), data = df)
-  lut <- tibble(quantile = names(lm$fitted.values), value = lm$fitted.values)
+  #lut <- tibble(quantile = names(lm$fitted.values), value = lm$fitted.values)
   return(lm)
 }
 
@@ -454,7 +454,9 @@ ggsave('figures/CorrectionPlots.png', plot = g, height = 8, width = 4, units = '
 ## Example for AGU talk
 correctionPlot('nir', 'l8') + labs(x = 'Landsat 8 NIR Reflectance', y = 'Landsat 7 NIR Reflectance', title = 'Reflectance Correction Procedure') + theme(legend.position = c(.8, .2))
 ggsave('figures/NirCorrExample.png', height = 4, width = 4, units = 'in')
-## Generate functions
+
+
+## Generate functions to actually apply to the data in the analysis
 bands <- tibble(band = c('blue', 'green', 'nir', 'red')) 
 funcs.8 <- bands %>%
   mutate(lm8 = purrr::map(band, lm8, x = refCompPre))
@@ -463,8 +465,7 @@ funcs.5 <- bands %>%
 
 save(funcs.8, funcs.5, file = 'models/landsat_poly_corrs.Rdata')
 
-##Apply the correction to the entire dataset.
-
+##Apply the correction to the entire dataset.  Done to SR data in 00_ParameterConfigurations
 refCompPost <- refCompPre %>%
   mutate(uniqueID = row_number()) %>%
   select(uniqueID, blue:nir, sat) %>%

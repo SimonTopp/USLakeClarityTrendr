@@ -3,9 +3,11 @@ title: "2_model_training"
 author: "Simon Topp"
 date: "11/8/2019"
 output: html_document
+editor_options: 
+  chunk_output_type: console
 ---
 
-#Attempt at FFS Using xgboost and spatial cross validation.
+#First, use FFS and LLTO_CV to reduce the parameter space and remove spatially autocorrelated variables.
 
 ```{r}
 ## Select parameters to go into model
@@ -16,7 +18,7 @@ features <- "NR, BG, dWL, inStreamCat, PctCarbResidCat, Precip8110Cat, Tmean8110
 
 features <- str_split(features, pattern = ', ') %>% unlist()
 
-##Pull holdout data
+##Pull 20% as holdout data
 set.seed(340987)
 holdOut <- srMunged %>%
   group_by(region) %>%
@@ -36,10 +38,10 @@ df <- df %>% mutate(SpaceTime = paste0(region, sat),
             group_by(group1) %>%
             mutate(group2 = cut_number(long, 3)) %>%
             ungroup() %>%
-            mutate(spaceCluster = paste0(group1,group2),
+            mutate(spaceCluster = paste0(group1,group2), #Use this or COMID
                    timeCluster = cut_number(julian, 9))
 
-folds <- CreateSpacetimeFolds(df, spacevar = 'spaceCluster', timevar = 'timeCluster', k= 3, seed = 34985)
+folds <- CreateSpacetimeFolds(df, spacevar = 'COMID', timevar = 'timeCluster', k= 10, seed = 34985)
 
 control <- trainControl(method="cv", savePredictions = 'none', 
                         returnResamp = 'final', index = folds$index, 
@@ -74,9 +76,10 @@ ffsResults %>%
 #ggsave('figures/rfeRMSE.png', device = 'png', width = 6, height = 4, units = 'in')
 ```
 
-### XGBoost with Default Hyperparameters
+### Build the final model for the analysis
 
 ```{r baseline model, message=FALSE}
+#Pull features from FFS and LLTO-CV
 ffsResults <- read_feather('out/ffsResultsFull.feather')
 features <- ffsResults[ffsResults$RMSE == min(ffsResults$RMSE),] %>%
   select(-c(nvar, RMSE, SE)) %>%
@@ -85,46 +88,44 @@ features <- ffsResults[ffsResults$RMSE == min(ffsResults$RMSE),] %>%
 oneHot <- onehot(df %>% select(features))
 df.encoded <- predict(oneHot, df %>% select(features)) %>% as.data.frame(.) 
 
-# We'll set up a tuning grid with default values, define a `trainControl()`
-# function (which in this case disables printing training log to console
-# plus disables resampling as we want to use all training data to fit the
-# model), and finally fit the model with `caret::train()`:
-
-grid_default <- expand.grid(
-  nrounds = 100,
-  max_depth = 4,
-  eta = 0.3,
-  gamma = 0,
-  colsample_bytree = .8,
-  min_child_weight = .8,
-  subsample = 1
-)
-
-#Set up a cluster to run everything in parrallel
-cl <- makePSOCKcluster(availableCores()/2)
-registerDoParallel(cl)
-
-train_control <- caret::trainControl(method="cv", savePredictions = T, 
-                          returnResamp = 'final', index = folds$index, 
-                          indexOut = folds$indexOut)
-
-xgb_base <- caret::train(
-  x = df.encoded,
-  y = df$value,
-  trControl = train_control,
-  tuneGrid = grid_default,
-  method = "xgbTree",
-  verbose = TRUE
-)
+# Set up a tune grid for a base model
+# 
+# grid_default <- expand.grid(
+#   nrounds = 100,
+#   max_depth = 4,
+#   eta = 0.3,
+#   gamma = 0,
+#   colsample_bytree = .8,
+#   min_child_weight = .8,
+#   subsample = 1
+# )
+# 
+# #Set up a cluster to run everything in parrallel
+# cl <- makePSOCKcluster(availableCores()/2)
+# registerDoParallel(cl)
+# 
+# train_control <- caret::trainControl(method="cv", savePredictions = T, 
+#                           returnResamp = 'final', index = folds$index, 
+#                           indexOut = folds$indexOut)
+# 
+# xgb_base <- caret::train(
+#   x = df.encoded,
+#   y = df$value,
+#   trControl = train_control,
+#   tuneGrid = grid_default,
+#   method = "xgbTree",
+#   verbose = TRUE
+# )
 ```
 
 # Grid search for GBLinear
 
 ```{r}
-## Get resonable nrounds for default learning rate
-grid_default <- expand.grid(
+
+## Set up a conservative grid search for hyperparameters
+grid_train <- expand.grid(
   nrounds = seq(100,300,100),
-  alpha = c(.1,.5,1), #Best was lambda = 1, alpha = .5, eta = .1
+  alpha = c(.1,.5,1),
   lambda = c(.1,.5,1),
   eta = c(.1, 0.3)
 )
@@ -141,23 +142,21 @@ base_model <- caret::train(
   x = df.encoded,
   y = df$value,
   trControl = train_control,
-  tuneGrid = grid_default,
+  tuneGrid = grid_train,
   method = "xgbLinear",
   preProcess = c('center', 'scale'),
   importance = F,
   verbose = TRUE
 )
 
-
 base_model$bestTune
 
 ## Build final model with best tune
-
 train_control1 <- caret::trainControl(method="cv", savePredictions = T, 
                           returnResamp = 'final', index = folds$index, 
                           indexOut = folds$indexOut, verboseIter = T)
 
-grid_train <- expand.grid(
+grid_final <- expand.grid(
   nrounds = base_model$bestTune$nrounds,
   alpha = base_model$bestTune$alpha,
   lambda = base_model$bestTune$lambda,
@@ -169,7 +168,7 @@ model <- caret::train(
   x = df.encoded,
   y = df$value,
   trControl = train_control1,
-  tuneGrid = grid_train,
+  tuneGrid = grid_final,
   method = "xgbLinear",
   preProcess = c('center', 'scale'),
   importance = T,
@@ -180,187 +179,6 @@ stopCluster(cl)
 
 ## Now look at holdout data
 
-holdout_x <- predict(oneHot, holdOut %>% select(features))
-
-holdout_y <- holdOut$value
-
-
-output <- tibble(Actual = holdout_y, Predicted = predict(model, holdout_x), log = 'none', UniqueID = holdOut$UniqueID)
-
-save(model, file = paste0('models/',iteration, '.Rdata'))
-write_feather(output, paste0('out/outputs/',iteration, '.feather'))
-```
-
-
-# Grid Search for Hyperparameters with gbTree
-
-```{r First tune, warning=FALSE, fig.height=7}
-# Base model
-
-nrounds <- 1000
-
-tune_grid <- expand.grid(
-  nrounds = seq(from = 100, to = nrounds, by = 100),
-  eta = c(0.05, 0.1, 0.3),
-  max_depth = c(2, 3, 4),
-  gamma = 0,
-  colsample_bytree = 1,
-  min_child_weight = 1,
-  subsample = 1
-)
-
-tune_control <- caret::trainControl(
-  method = "cv", # cross-validation
-  index = folds$index,
-  indexOut = folds$indexOut,# with n folds 
-  verboseIter = FALSE, # no training log
-  allowParallel = TRUE # FALSE for reproducible results 
-)
-
-xgb_tune <- caret::train(
-  x = df.encoded,
-  y = df$value,
-  trControl = tune_control,
-  tuneGrid = tune_grid,
-  method = "xgbTree",
-  verbose = TRUE
-)
-
-# helper function for the plots
-tuneplot <- function(x, probs = .90) {
-  ggplot(x) +
-    coord_cartesian(ylim = c(quantile(x$results$RMSE, probs = probs), min(x$results$RMSE))) +
-    theme_bw()
-}
-
-tuneplot(xgb_tune)
-xgb_tune$bestTune
-
-#  Step 2: Maximum Depth and Minimum Child Weight
-
-tune_grid2 <- expand.grid(
-  nrounds = seq(from = 50, to = nrounds, by = 50),
-  eta = xgb_tune$bestTune$eta,
-  max_depth = ifelse(xgb_tune$bestTune$max_depth == 2,
-    c(xgb_tune$bestTune$max_depth:4),
-    xgb_tune$bestTune$max_depth - 1:xgb_tune$bestTune$max_depth + 1),
-  gamma = 0,
-  colsample_bytree = 1,
-  min_child_weight = c(1, 2, 3),
-  subsample = 1
-)
-
-xgb_tune2 <- caret::train(
-  x = df.encoded,
-  y = df$value,
-  trControl = tune_control,
-  tuneGrid = tune_grid2,
-  method = "xgbTree",
-  verbose = TRUE
-)
-
-tuneplot(xgb_tune2)
-xgb_tune2$bestTune
-
-# Step 3: Column and Row Sampling
-
-tune_grid3 <- expand.grid(
-  nrounds = seq(from = 50, to = nrounds, by = 50),
-  eta = xgb_tune$bestTune$eta,
-  max_depth = xgb_tune2$bestTune$max_depth,
-  gamma = 0,
-  colsample_bytree = c(0.4, 0.6, 0.8, 1.0),
-  min_child_weight = xgb_tune2$bestTune$min_child_weight,
-  subsample = c(0.5, 0.75, 1.0)
-)
-
-xgb_tune3 <- caret::train(
-  x = df.encoded,
-  y = df$value,
-  trControl = tune_control,
-  tuneGrid = tune_grid3,
-  method = "xgbTree",
-  verbose = TRUE
-)
-
-tuneplot(xgb_tune3, probs = .95)
-xgb_tune3$bestTune
-
-# Step 4: Gamma
-
-tune_grid4 <- expand.grid(
-  nrounds = seq(from = 50, to = nrounds, by = 50),
-  eta = xgb_tune$bestTune$eta,
-  max_depth = xgb_tune2$bestTune$max_depth,
-  gamma = c(0, 0.05, 0.1, 0.5, 0.7, 0.9, 1.0),
-  colsample_bytree = xgb_tune3$bestTune$colsample_bytree,
-  min_child_weight = xgb_tune2$bestTune$min_child_weight,
-  subsample = xgb_tune3$bestTune$subsample
-)
-
-xgb_tune4 <- caret::train(
-  x = df.encoded,
-  y = df$value,
-  trControl = tune_control,
-  tuneGrid = tune_grid4,
-  method = "xgbTree",
-  verbose = TRUE
-)
-
-tuneplot(xgb_tune4)
-xgb_tune4$bestTune
-
-# ## Step 5: Reducing the Learning Rate
-
-tune_grid5 <- expand.grid(
-  nrounds = seq(from = 100, to = 1000, by = 50),
-  eta = c(0.05, 0.1, .15), #c(0.01, 0.015, 0.025, 0.05, 0.1),
-  max_depth = xgb_tune2$bestTune$max_depth,
-  gamma = xgb_tune4$bestTune$gamma,
-  colsample_bytree = xgb_tune3$bestTune$colsample_bytree,
-  min_child_weight = xgb_tune2$bestTune$min_child_weight,
-  subsample = xgb_tune3$bestTune$subsample
-)
-
-xgb_tune5 <- caret::train(
-  x = df.encoded,
-  y = df$value,
-  trControl = tune_control,
-  tuneGrid = tune_grid5,
-  method = "xgbTree",
-  verbose = TRUE
-)
-
-tuneplot(xgb_tune5)
-xgb_tune5$bestTune
-
-# ## Fitting the Model
-
-(final_grid <- expand.grid(
-  nrounds = xgb_tune5$bestTune$nrounds,
-  eta = xgb_tune5$bestTune$eta,
-  max_depth = xgb_tune5$bestTune$max_depth,
-  gamma = xgb_tune5$bestTune$gamma,
-  colsample_bytree = xgb_tune5$bestTune$colsample_bytree,
-  min_child_weight = xgb_tune5$bestTune$min_child_weight,
-  subsample = xgb_tune5$bestTune$subsample
-))
-
-
-(model <- caret::train(
-  x = df.encoded,
-  y = df$value,
-  trControl = train_control,
-  tuneGrid = final_grid,
-  method = "xgbTree",
-  verbose = TRUE
-))
-
-stopCluster(cl)
-```
-
-
-```{r hold-out RMSE}
 holdout_x <- predict(oneHot, holdOut %>% select(features))
 
 holdout_y <- holdOut$value

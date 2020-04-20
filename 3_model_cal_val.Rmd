@@ -1,15 +1,15 @@
 ---
-title: "__FFS and Spatial CV"
+title: "3_ModelCalVal"
 author: "Simon Topp"
 date: "8/27/2019"
 output: html_document
 editor_options: 
   chunk_output_type: console
 ---
-# This script takes the munged optical and landscape data and runs it through various feature selection algorithms to determine the inputs for the final models.
-
+# This script evaluates our model using the hold-out data in a variety of different ways.
 
 ```{r Eval}
+#Get general evaluation metrics
 evals <- output %>%
   summarise(rmse = rmse(Actual, Predicted),
             mae = mae(Actual, Predicted),
@@ -19,7 +19,8 @@ evals <- output %>%
             smape = smape(Actual, Predicted)) %>%
   mutate(iteration = iteration)
 
-evals %>% kable(digits = 2) %>% kable_styling() %>% scroll_box(width = '4in')
+evals %>% kable(digits = 5) %>% kable_styling() %>% scroll_box(width = '4in')
+
 
 ggplot(output, aes(x = Actual, y = Predicted)) + 
   geom_hex(aes(fill = ..count..)) + 
@@ -35,40 +36,57 @@ ggplot(output, aes(x = Actual, y = Predicted)) +
 
 ggsave('figures/ModelValidation.png', width = 4, height = 3.5, units = 'in')
 
+# We overpredict low values and underpredict high ones, see how badly we do this
 output %>% mutate(groups = cut_number(Actual, 10, labels = F)) %>% group_by(groups) %>% summarise(bias = bias(Actual, Predicted)) %>% ggplot(aes(x = groups, y = bias)) + geom_point() + theme_bw() + labs(title = 'Bias over value range', x  = 'deciles', y = 'Bias')
 
 ggsave('figures/BiasOverValues.png', width = 3, height = 2.5, units = 'in')
 
-
+#Join back up the full dataframe to examine error accross observation attributes
 output.full <- output %>%
   left_join(srMunged, by = 'UniqueID') %>%
   mutate(residual = Actual - Predicted,
          year = year(date),
          month = month(date))
 
+## Secondary Validation figure
 ## Look at validation by lake size
-output.full %>% mutate(Size.Group = cut(areasqkm, breaks = c(-1,.1,1,10,100,100000), labels = c('<.1','.1-1','1-10', '10-100', '>100'))) %>% ggplot(aes(x = Actual, y = Predicted)) + 
+p1 <- output.full %>% mutate(Size.Group = cut(areasqkm, breaks = c(-1,.1,1,10,100,100000), labels = c('<.1','.1-1','1-10', '10-100', '>100'))) %>% ggplot(aes(x = Actual, y = Predicted)) + 
   geom_hex(aes(fill = ..count..)) + 
   scale_fill_viridis(name = 'Point\nCount', trans = 'log10') + 
   geom_abline(color = 'red') + 
   stat_poly_eq(aes(label =  paste(stat(adj.rr.label))),
                formula = y~x, parse = TRUE, 
-               label.y = Inf, vjust = 1.3) +
-  #scale_x_continuous(trans = 'log10', labels = scales::comma) +
-  #scale_y_continuous(trans = 'log10', labels = scales::comma) +
-  #coord_equal(ratio = 1) +
-  labs(title = 'Hold-Out Validation by Lake Size (sq km)', subtitle = 'Red line is 1:1', x = 'Actual', y = 'Predicted') + facet_wrap(~Size.Group)
+               label.y = Inf, vjust = 1.1, size = 3) +
+  theme_bw() +
+  labs(title = 'Hold-Out Validation by Lake Size (sq. km)', x = 'Actual', y = 'Predicted', tag = 'A)') + facet_wrap(~Size.Group)
 
 ## Validation by satellite
-output.full %>% ggplot(aes(x = Actual, y = Predicted)) + 
+p2 <- output.full %>% 
+  mutate(sat = factor(sat, levels = c('l5', 'l7','l8'), labels = c('Landsat 5', 'Landsat 7', 'Landsat 8'))) %>%
+  ggplot(aes(x = Actual, y = Predicted)) + 
   geom_hex(aes(fill = ..count..)) + 
   scale_fill_viridis(name = 'Point\nCount', trans = 'log10') + 
   geom_abline(color = 'red') + 
   stat_poly_eq(aes(label =  paste(stat(adj.rr.label))),
                formula = y~x, parse = TRUE, 
-               label.y = Inf, vjust = 1.3) +
-  labs(title = 'Hold-Out Validation by Sensor', subtitle = 'Red line is 1:1', x = 'Actual', y = 'Predicted') +
+               label.y = Inf, vjust = 1.1, size = 3) +
+  labs(title = 'Hold-Out Validation by Sensor', x = 'Actual', y = 'Predicted', tag = 'B)') +
+  theme_bw() +
   facet_wrap(~sat, nrow = 1)
+
+## By year
+p3 <- output.full %>% group_by(year) %>% summarise(bias = bias(Actual, Predicted)) %>%
+  ggplot(aes(x = year, y = bias)) + 
+  geom_point() + geom_line() + 
+  geom_smooth(method = 'lm') +
+  theme_bw() + 
+  labs(title = 'Hold-Out Bias by Year', tag = 'C)', x = 'Year', y = 'Bias (Actual-Predicted)') +
+  ggpubr::stat_regline_equation(label.x.npc = 'middle', label.y.npc  = 'top')
+
+layout <- rbind(c(1,1,1), c(1,1,1),c(1,1,1),c(2,2,2),c(2,2,2),c(3,3,NA), c(3,3,NA))
+g <- grid.arrange(p1,p2,p3, layout_matrix = layout)
+
+ggsave('figures/ValidationBreakDown.png', width = 6, height = 8, units = 'in', plot = g)
   
 ##look for errors associated with certain things
 output.full %>% ggplot(., aes(x = residual, y = AOD)) + geom_hex()
@@ -84,7 +102,7 @@ scale_x_reordered <- function(..., sep = "___") {
   ggplot2::scale_x_discrete(labels = function(x) gsub(reg, "", x), ...)
 }
 
-## Summary metrics across space time and observed value
+## Summary metrics across space, time, and observed value
 errorSum <- output.full %>%
   #filter(Param == 'secchi') %>%
   mutate(Observed.Value = Actual) %>%
@@ -110,34 +128,33 @@ ggsave('figures/SpaceTimeAbs.png', width = 4, height = 5, units = 'in')
 spaceTimeFigs(abs = F)
 ggsave('figures/SpaceTimeRel.png', width = 4, height = 5, units = 'in')
 
+##  Look at distribution of residuals across time
 output.full %>% mutate(yearGroups = cut_number(year, 20)) %>%
   ggplot(., aes(x = yearGroups, y = residual)) + 
   #geom_boxplot() +
   geom_violin(draw_quantiles = c(.25,.5,.75)) + 
   theme(axis.text.x = element_text(angle = 90, vjust = .5))
-  
-  group_by(yearGroups) %>%
-  summarise(mean.residual = mean(residual),
-            sd.residual = sd(residual)) %>%
-  ggplot(., aes(x = yearGroups, y = mean.residual)) + geom_point() + geom_errorbar(aes(ymin = mean.residual - sd.residual, ymax = mean.residual + sd.residual)) + theme(axis.text.x = element_text(angle = 90, vjust = .5))
-  
+
 ##View the feature importance
 model$modelInfo$varImp(model$finalModel) %>%
   mutate(Feature = fct_reorder(rownames(.), Overall, .desc = T)) %>%
   arrange(Overall) %>%
   ggplot(., aes(x = Feature, y = Overall)) + 
   geom_col() +
-  scale_x_discrete(labels = c('Forel-Ule Index','Blue/Green','Mean Temperature','Forest Cover','Lake Depth','NIR/Red','Wetland Cover', 'Mean Runoff','Water Table Depth','Topographic Wetness','Kffactor (Erosion Index)')) + 
+  #scale_x_discrete(labels = c('Forel-Ule Index','Mean Temperature','Lake Depth', 'Wetland Cover','Mean Runoff', 'Forest Cover','Topographic Wetness', 'Water Table Depth', 'Blue/Green','NIR/Red','Kffactor (Erosion Index)')) +  #For final make labels nice
   coord_flip() +
   theme_bw() +
   labs(title = 'Feature Importance', y = 'Importance (Model Gain)') 
 
 ggsave('figures/FeatImp.png', width = 3.5, height = 3, units = 'in')
+model$modelInfo$varImp(model$finalModel) 
 ```
 
 
+# Regional/Satellite specific model fit.
 
 ```{r, fig.height= 8}
+#Figure for error by satellite
 output.full %>% 
   group_by(sat) %>%
   summarise(mae = mae(Actual, Predicted),
@@ -153,6 +170,7 @@ output.full %>%
 
 ggsave('figures/ErrorBySat.png', width = 3, height = 2.5)  
 
+#Generate confidence intervals for erros metrics
 val.conf <- output.full %>%
   mutate(smape = 2*(abs(Actual - Predicted)/(abs(Actual) + abs(Predicted))),
          p.bias = (Actual - Predicted)/abs(Actual)) %>%
@@ -162,7 +180,8 @@ val.conf <- output.full %>%
   mutate(p.bias = ifelse(is.na(p.bias), 0, p.bias),
          smape = ifelse(is.na(smape), 0, smape)) %>%
   gather(smape, p.bias, key = 'Metric', value = 'sd')
-  
+
+#regional breakdown by satellite  
 output.full %>%
   group_by(region, sat, log) %>%
   summarise(smape = smape(Actual, Predicted),
@@ -184,7 +203,7 @@ ggsave('figures/RegionalErrors.png', width =6, height = 6, units = 'in')
 
 ggplot(output.full, aes(x = residual, color = sat)) + geom_density() + facet_wrap(~region)
 
-
+#Model fit by satellite
 ggplot(output.full, aes(x = Actual, y = Predicted)) + 
   geom_point(alpha = .3) +
   geom_smooth(method = 'lm', aes(color = sat)) +
@@ -203,6 +222,7 @@ ggsave('figures/RegionalModelFit.png', width = 6.5, height =6, units = 'in')
 
 dummy <- expand.grid(year = seq(1985,2018), month = c(1:12), region = factor(unique(region$region)))
 
+## Replicate the regional/annual aggregation in the analysis to get aggregated error metrics
 fieldmatch.coin <- output.full %>%
   filter(year < 2019,
          month %in% c(5:9)) %>%
@@ -256,6 +276,7 @@ p3 <- ggplot(fieldmatch.coin, aes(x = year, y = mean, color = Measure)) +
 layout <- rbind(c(1,2),c(3,3),c(3,3))
 g <- grid.arrange(p1,p2, p3, layout_matrix = layout)
 
+#Figure 1: Validation
 ggsave('figures/HoldOutValidation.png', plot = g, width = 6.5, height = 8, units = 'in')
 
 evals.aggregated <- fieldmatch.coin %>%

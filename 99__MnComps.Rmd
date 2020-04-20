@@ -213,7 +213,6 @@ lake.input <- predict(encoder, df %>% select(features))
 
 value = tibble(value = predict(model, lake.input))
 
-    
 predicted <- df %>%
   select(system.index, COMID, date, year, month) %>%
   bind_cols(value) %>%
@@ -233,26 +232,30 @@ predsMN <- predicted %>%
   mutate(source = 'RS') %>%
   bind_rows(mnCheck %>% filter(year %in% c(1985,1990,1995, 2000,2005, 2008)))
 
-ggplot(predsMN, aes(x = year, y = value, color = source)) + 
+p1 <- ggplot(predsMN %>% filter(source != 'manual'), aes(x = year, y = value, color = source)) + 
   geom_line() + geom_point(alpha = .4) +
   theme_bw() +
-  scale_color_viridis_d(end = .8, labels = c('LB_Shapefile', 'LB_Website', 'Our Preds')) +
+  scale_color_viridis_d(end = .8, labels = c('LakeBrowser', 'This Study')) +
   facet_wrap(~Ecoregion, nrow = 2) +
-  theme(legend.position = c(.9,.2)) +
+  theme(legend.position = c(.9,.2),
+        axis.text.x = element_text(angle = 30, hjust = 1)) +
   labs(x = 'Year', y = 'Predicted Secchi (m)', title = 'Lake Browser Timeseries Comparisons')
 
 ggsave('figures/__MN_TS_Comps.png', width = 5, height = 4, units = 'in')
 
 predsMN %>%
   spread(source, value) %>%
-  ggplot(.,aes(x = RS, y = data)) + geom_point(aes(color = Ecoregion)) +
+  mutate(Driftless = ifelse(Ecoregion == 'Driftless Area', 'Driftless Area', 'Other Regions'))  %>%
+  ggplot(.,aes(x = RS, y = data)) + geom_point(aes(color = Driftless)) +
   geom_smooth(method = 'lm', se = F) +
-  geom_abline(color = 'red') + 
+  #geom_abline(color = 'red') + 
   stat_poly_eq(aes(label =  paste(stat(adj.rr.label))),
                formula = y~x, parse = TRUE, 
                label.y = Inf, vjust = 1.3) +
-  labs(x = 'Our Predictions', y = 'LakeBrowser Predictions (Shapefile)', title = 'LakeBrowser Vs Us',subtitle = 'Red line = 1:1, Blue = linear regression') + 
-  theme_bw() 
+  ggpubr::stat_regline_equation(vjust = 2.4) +
+  labs(x = 'This Study', y = 'LakeBrowser Predictions', color = '') + 
+  theme_bw()  
+
 ggsave('figures/__MN_OverallComps.png', width = 4, height = 3, units = 'in')
 
 lms <- predsMN %>%
@@ -293,7 +296,6 @@ bias(mnWide$manual, mnWide$RS)
 rmse(mnWide$manual, mnWide$RS)
 mae(mnWide$manual, mnWide$RS)
 ```
-
 
 
 ## Initial Comparison Code
@@ -354,6 +356,8 @@ LBjoin <- centerJoin %>% select(COMID,grep('MEAN', names(LBPreds), value = T)) %
   
   
 obs.join <- sum.means %>% left_join(LBjoin)
+#write_feather(obs.join, 'out/MN_LB_Comparison/FullObsJoin.feather')
+obs.join <- read_feather('out/MN_LB_Comparison/FullObsJoin.feather')
 
 ggplot(obs.join, aes(x = LB.mean, y = Topp.mean)) + geom_hex() + 
   scale_fill_viridis_c() +theme_bw() + 
@@ -364,9 +368,9 @@ ggplot(obs.join, aes(x = LB.mean, y = Topp.mean)) + geom_hex() +
                label.y = Inf, vjust = 1.3) +
   coord_cartesian(xlim = c(0,10), ylim = c(0,10)) +
   facet_wrap(~year) + 
-  ggtitle("Lake Based Comparison of Clarity Estimation")
+  labs(x = 'LakeBrowser Prediction', y = 'This Study Prediction') 
 
-  ggsave('figures/__MN_LakeBasedComps.png', width = 5, height =3.5, units = 'in')
+ggsave('figures/__MN_LakeBasedComps.png', width = 5, height =3.5, units = 'in')
 
 yearlyMetrics <- obs.join %>%
   na.omit() %>%
@@ -392,8 +396,9 @@ p1 <- fieldCheck %>% ggplot(., aes(x = LB.mean, y = field))  + geom_hex() +
                formula = y~x, parse = TRUE, 
                label.y = Inf, vjust = 1.3) +
   geom_abline(color = 'red') +
+  theme_bw() +
   #coord_cartesian(xlim = c(0,10), ylim = c(0,10)) + 
-  ggtitle('LakeBrowser')  
+  labs(tag = 'A)', x = 'LakeBrowser Mean', y = 'Field Mean')  
 
 p2 <- fieldCheck %>% ggplot(., aes(x = Topp.mean, y = field)) + geom_hex() + 
   facet_wrap(~year) +
@@ -402,12 +407,13 @@ p2 <- fieldCheck %>% ggplot(., aes(x = Topp.mean, y = field)) + geom_hex() +
                formula = y~x, parse = TRUE, 
                label.y = Inf, vjust = 1.3) +
   geom_abline(color = 'red') +
+  theme_bw() +
   #coord_cartesian(xlim = c(0,10), ylim = c(0,10)) +
-  ggtitle('Our Preds')
+  labs(tag = 'B)', x = 'This Study Mean', y = 'Field Mean')
 
 g <- grid.arrange(p1,p2, nrow = 2)
 
-ggsave('figures/__LBCompFieldVal.png', plot = g, width = 5, height = 8)
+ggsave('figures/__LBCompFieldVal.png', plot = g, width = 6, height = 8)
 
 p3 <-fieldCheck %>%
   na.omit() %>%

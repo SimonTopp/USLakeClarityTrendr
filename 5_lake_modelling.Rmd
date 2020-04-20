@@ -1,5 +1,5 @@
 ---
-title: "4_LakeModelling"
+title: "5_LakeModelling"
 author: "Simon Topp"
 date: "9/11/2018"
 output: html_document
@@ -13,7 +13,7 @@ editor_options:
 # Load in lakeCat data
 lc.files <- list.files('in/lakeCat/unzip', full.names = T)
 
-# Join lakes to nhd plus LakeCat data
+# Join lakes to nhd plus LakeCat data, lake.join and lakes.up are defined in 00_ParameterConfiguration
 for(i in lc.files){
   if(i == first(lc.files)){
     lc <- read.csv(i) %>% mutate(COMID = factor(COMID))
@@ -46,7 +46,7 @@ lake.join <- lake.join %>%
 #Round the majority of values to the nearest 1 to avoid variables becoming 'unique ID's)
 round1 <- names(lake.join %>% select(c(CatAreaSqKm:CatPctFull,PctImp2006Cat, PctCarbResidCat:WetIndexCat)))
 
-## Round a few to 10 because they're variation is real big and larger values with 
+## Round a few to 1 because they're variation is real big and larger values with 
 #Round a subset to the nearest 10th because their values more or less range from 0 to 1.
 round.1 <- names(lake.join %>% select(c(AgKffactCat, KffactCat, MineDensCat)))
 
@@ -82,14 +82,37 @@ features <- ffsVariables[ffsVariables$RMSE == min(ffsVariables$RMSE),] %>%
   select(-c(nvar, RMSE, SE)) %>%
   paste(.) %>% .[.!= 'NA']
 
+#For NLA_2012 full lake medians
+lakesDown = list.files('lake_data/NLA2012', full.names = T)
+
 plan(multiprocess(workers = availableCores()-1))
 
 Preds.out <-  ids %>% future_map_dfr(~EvalPreds(id = .,paths = lakesDown, lakesUp = lake.join, log = log, model = model, features = features, lakeSamp = lakeSamp), .progress = T)
 
 plan(sequential)
 
+#write_feather(Preds.out, paste0('out/TS_Preds/', lakeSamp, '_',iteration,'.feather'))
+Preds.out<- read_feather(paste0('out/TS_Preds/TS_Predictions_',iteration,'.feather'))
+```
 
-write_feather(Preds.out, paste0('out/TS_Preds/', lakeSamp, '_',iteration,'.feather'))
-#Preds.out<- read_feather(paste0('out/TS_Preds/TS_Predictions_',iteration,'.feather'))
+
+```{r}
+##2007 NLA wasn't part of the original pipeline, quickly generate preds for it here
+
+# ids <- list.files('lake_data/NLA2007_cntr') %>% strsplit(split = '.csv', fixed = T) %>% unlist()
+# lakesDown <- list.files('lake_data/NLA2007_cntr', full.names = T)
+# lake.join <- read_feather('out/NLA2007LakesFull.feather')
+# ## Bad form, but you need to comment out part of the function for this because
+# ## there's no l8 involved and it'll throw errors otherwise.
+# plan(multiprocess(workers = availableCores()-4))
+# 
+# nla.2007.preds <- ids %>% future_map_dfr(~EvalPreds(id = .,paths = lakesDown, lakesUp = lake.join, log = log, model = model, features = features, lakeSamp = lakeSamp), .progress = T)
+# 
+# plan(sequential)
+# 
+# nla.2007.preds <- nla.2007.preds %>% mutate(region = factor(region,
+#                          labels = c("Coastal Plain", "Northern Appalachians", "Northern Plains", "Southern Appalachians", "Southern Plains", "Temperate Plains", "Upper Midwest","Western Mountains","Xeric West")))
+# write_feather(nla.2007.preds, 'out/nla2007_preds.feather')
+
 ```
 

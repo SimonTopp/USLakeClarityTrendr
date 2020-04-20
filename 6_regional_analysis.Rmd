@@ -1,0 +1,710 @@
+---
+title: "6_LakeAnalysis"
+author: "Simon Topp"
+date: "4/17/2019"
+output: html_document
+editor_options: 
+  chunk_output_type: console
+---
+
+# This document details the primary results of regionalized bootstrapping for remotely sensed lake water clarity timeseries.
+## First, compare the predictions with NLA values as a final validation
+
+```{r}
+# Pull in the NLA predictions and the field values downloaded from
+# https://www.epa.gov/national-aquatic-resource-surveys/nla
+nla.2007.preds <- read_feather('out/TS_Preds/NLA2007_cntr_gbLinear.feather') %>%
+  mutate(region = factor(region, 
+                         labels = c("Coastal Plain", "Northern Appalachians", "Northern Plains", "Southern Appalachians", "Southern Plains", "Temperate Plains", "Upper Midwest","Western Mountains","Xeric West")))
+
+nla.2007 <- read.csv('in/NLA/nla2007_secchi_20091008.txt', stringsAsFactors = F) %>%
+  select(SITE_ID, secchi = SECMEAN, date = DATE_SECCHI) %>%
+  left_join(read.csv('in/NLA/nla2007_sampledlakeinformation_20091113.txt') %>%
+              select(SITE_ID, COMID = COM_ID, region = WSA_ECO9, 
+                     lat = LAT_DD, long = LON_DD))
+
+nla.2012 <- read.csv('in/NLA/nla2012_secchi_08232016.txt', stringsAsFactors = F) %>%
+  select(SITE_ID, secchi = SECCHI, date = DATE_COL) %>%
+  left_join(read.csv('in/NLA/nla2012_wide_siteinfo_08232016.txt') %>%
+              select(SITE_ID, COMID = COMID2012, region = AGGR_ECO9_2015, 
+                     lat = LAT_DD83, long = LON_DD83))
+
+check <- read.csv('in/NLA/nla2012_wide_siteinfo_08232016.txt', stringsAsFactors = F)
+
+## Original NLA Sample was all proposed lakes, filter it down to just the actually sampled ones.
+Preds.out <- Preds.out %>% filter(COMID %in% nla.2012$COMID)
+lake.join <- lake.join %>% filter(COMID %in% nla.2012$COMID)
+
+nlaFull <- nla.2007 %>%
+  mutate(nla.year = 2007) %>%
+  bind_rows(nla.2012 %>% mutate(nla.year = 2012)) %>%
+  mutate(date = mdy(date),
+         year = year(date),
+         month = month(date),
+         region = factor(region, 
+                         labels = c("Coastal Plain", "Northern Appalachians", "Northern Plains", "Southern Appalachians", "Southern Plains", "Temperate Plains", "Upper Midwest","Western Mountains","Xeric West"))) %>%
+  group_by(SITE_ID, region, nla.year) %>%
+  summarise(secchi = median(secchi, na.rm = T)) %>%
+  group_by(region, nla.year) %>%
+  rename(year = nla.year) %>%
+  summarise(secchi.mean = mean(secchi, na.rm = T),
+            secchi.median = median(secchi, na.rm = T),
+            secchi.sd = sd(secchi, na.rm =T)) %>%
+  mutate(source = 'NLA')
+
+# Combine with our model predictions
+predComp <- nla.2007.preds %>% 
+  filter(month %in% c(5:9)) %>%
+  bind_rows(Preds.out %>%
+  filter(month %in% c(5:9), year == 2012)) %>%
+  mutate(source = 'Landsat') %>%
+  na.omit() %>%
+  group_by(year, region, source) %>%
+  summarise(secchi.mean = mean(value, na.rm = T),
+            secchi.median = median(value, na.rm = T),
+            secchi.sd = sd(value, na.rm =T))  %>%
+  bind_rows(nlaFull)
+
+
+# Check out the results  
+ggplot(predComp, aes(x = region, color = source)) +
+  geom_point(aes(y = secchi.mean)) +
+  #geom_point(aes(y = secchi.median)) +
+  geom_errorbar(aes(ymin = secchi.mean - secchi.sd, ymax = secchi.mean + secchi.sd)) +
+  scale_color_viridis_d(end = .7) +
+  facet_wrap(~year) +
+  theme_bw() +
+  theme(axis.text.x = element_text(angle = 90, hjust = 1)) +
+  labs(x = 'Region', y = 'Water Clarity (m)', title = 'Comparison of NLA to Remotely Sensed Predictions')
+
+ggsave('figures/NLAComps.png', width = 6, height = 4, units = 'in')
+
+check <- predComp %>% select(-secchi.median, -secchi.sd) %>% spread(source, secchi.mean)
+rmse(check$NLA, check$Landsat)
+bias(check$NLA, check$Landsat)
+mape(check$NLA, check$Landsat)
+mae(check$NLA, check$Landsat)
+
+```
+
+## Pull out median summer values first by lake and then region to examine non-monotic trends.
+
+```{r}
+## Take a quick look at mean trends in each HUC2
+
+#How many lakes failed? The way the code is written we'll have 1 row of NA's for each lake that failed
+colSums(is.na(Preds.out)) ##302 out of ~2.5k for NLA 2012 lakes, not bad, in spot checking this is a landsat visible issue.  Much worse for Random Sample, 4,638
+
+##Look at summer median values
+Preds.out%>%
+  left_join(lake.join %>% select(COMID, areasqkm)) %>%
+  na.omit() %>%
+  filter(month %in% c(5:9)) %>%
+  group_by(year, region) %>%
+  summarise(value = mean(value)) %>%
+  ggplot(., aes(x = year, y = value, color = region)) +
+  geom_line() +
+  geom_point() +
+  labs(y = 'SDD (m)', title = 'SDD by HUC2 over time')
+
+#Create dataframe of median summer values for each lake plus a mk-test stats
+summ.meds <- Preds.out %>%
+  filter(month %in% c(5:9),
+         year < 2019) %>% ##Incomplete obs for 2019 so we won't use it.
+  group_by(COMID, year, region) %>%
+  summarise(secchi.med = median(value))
+
+
+##Quick figure illustrating proportion of lakes with data by year
+summ.meds %>%
+  filter(!is.na(value)) %>%
+  group_by(COMID, year) %>%
+  summarise(dataFrac = n()/1012) %>% ## or 13060 for random, 1012 for NLA
+  ggplot(., aes(x = year, y = dataFrac)) + geom_col()
+
+####  Create wide dataset 
+summ.meds.wide <- summ.meds %>%
+  filter(COMID %in% counts$COMID) %>%
+  spread(year, secchi.med)
+
+##Check regional counts to make sure they're reasonable
+summ.meds.wide %>% group_by(region) %>% summarise(count = n())
+
+###### Apply 1000 rounds of bootstrapping to yearly summer medians
+
+## Map over the regions and pull out summary stats
+set.seed(2345)
+bootstrapped.ts <- summ.meds.wide %>%
+  group_by(region) %>%
+  nest() %>%
+  mutate(boot.means= purrr::map(data, ~boot(.,boot.med, R = 1000)),
+         boots.summ = purrr::map(boot.means, boot.summary)) %>%
+  select(-boot.means, -data) %>%
+  unnest(boots.summ)
+
+## Generate a figure showing the mean summer clarity and 'stability' (sd of bootstrap iterations) for each lake.
+bootstrapped.ts %>%
+  filter(year < 2019) %>%
+  ggplot(., aes(x = year, y = mean)) +
+  geom_errorbar(aes(ymin = mean - se, ymax = mean + se), color = 'grey60', alpha = .4) +
+  geom_path(color = 'red') +
+  theme_bw() +
+  geom_point() +
+  facet_wrap(~region, scales = 'free', ncol = 2) +
+  labs(title = 'Mean and 90% confidence bound (stability)')
+
+#####Look at MK stats for for each region.
+summaryMK <- bootstrapped.ts %>%
+  na.omit() %>%
+  group_by(region) %>%
+  arrange(year) %>%
+  nest() %>%
+  mutate(mk = purrr::map(data, ~sens.slope(.$mean)),
+         sen.slope = purrr::map_dbl(mk, 'estimates'),
+         sen.slope = sen.slope*100,
+         #conf95 = purrr::map(mk, 'conf.int'),
+         p.value = purrr::map_dbl(mk, 'p.value'),
+         p.value = round(p.value, 5),
+         sig = ifelse(p.value < .01, '***', ifelse(p.value < .05, '**', ifelse(p.value < 0.1, '*', NA)))) %>%
+  select(-data, -mk)
+
+## Quick MK results plot, final figure is below.
+summaryMK %>%
+  left_join(region %>% st_simplify(dTolerance = 1000)) %>%
+  rowwise() %>%
+  mutate(coords.x = st_point_on_surface(geometry)[1],
+    coords.y = st_point_on_surface(geometry)[2]) %>%
+  ungroup() %>%
+  ggplot(.) +
+    geom_sf(aes(fill = sen.slope, geometry = geometry)) +
+    geom_text(aes(x = coords.x, y = coords.y, label = sig), size = 4, color = 'red') +
+    scale_color_manual(values = 'red', breaks = 'yes') +
+    scale_fill_gradient2(low='#F56217', mid='#ffffff', high='#0B486B')+
+    labs(fill = 'Slope (cm/year)', title = 'MannKendall Slopes') +
+    guides(color = guide_legend(label = F))
+
+write_feather(bootstrapped.ts, paste0('out/TS_Preds/',lakeSamp,'_bootstrapped.feather'))
+write_feather(summaryMK, paste0('out/TS_Preds/',lakeSamp,'_summaryMK.feather'))
+
+
+## Look at distribution of size across regions to see if there are only big lakes in the southeast.
+
+```
+
+## Compare remotely sensed and in situ observations
+
+```{r}
+# Pull in the field mean calculated during CalVal, join it with our predictions
+fieldMean <- read_feather('out/RegionalsInSituMeans.feather')
+
+meanFull <- fieldMean %>% 
+  mutate(source = 'In.Situ', se = NA, bias = NA) %>%
+  bind_rows(read_feather('out/TS_Preds/NLA2012_cntr_bootstrapped.feather') %>%
+              mutate(source = 'NLA')) %>%
+  bind_rows(read_feather('out/TS_Preds/EcoReg2000_cntr_bootstrapped.feather') %>%
+              mutate(source = 'Random')) %>% 
+  bind_rows(read_feather('out/TS_Preds/Over10_bootstrapped.feather') %>%
+              mutate(source = 'Large.Lakes'))
+
+# Look are correlations between observed patterns from RS and field values
+nla.rand.cor <- meanFull %>% select(year,region, mean, source) %>% spread(source, mean) %>%
+  group_by(region) %>%
+  nest() %>%
+  mutate(NLA.Random.Corr = purrr::map(data, ~cor.test(.$NLA, .$Random)),
+         cor = purrr::map_dbl(NLA.Random.Corr, 'estimate'),
+         p.value = purrr::map_dbl(NLA.Random.Corr, 'p.value'))
+
+nla.situ.cor <- meanFull %>% select(year,region, mean, source) %>% spread(source, mean) %>%
+  group_by(region) %>%
+  nest() %>%
+  mutate(NLA.Situ.Corr = purrr::map(data, ~cor.test(.$NLA, .$In.Situ)),
+         cor = purrr::map_dbl(NLA.Situ.Corr, 'estimate'),
+         p.value = purrr::map_dbl(NLA.Situ.Corr, 'p.value'),
+         sig = ifelse(p.value < .01, '***', ifelse(p.value < .05, '**', ifelse(p.value < 0.1, '*', NA))))
+
+
+## Plot up the results, Figure 2 panel B in the paper
+colors = viridis(9, begin = .2, direction = -1)
+
+p1 <- meanFull %>%
+  filter(year < 2019) %>%
+  filter(source != 'In.Situ', source != 'Large.Lakes') %>%
+  ggplot(., aes(x = year, y = mean, group = source, color = source)) +
+  geom_errorbar(aes(ymin = mean - se, ymax = mean + se), color = 'grey60', alpha = .8) +
+  geom_line() +
+  theme_bw() +
+  #geom_point() +
+  scale_color_viridis_d(end = .5) +
+  facet_wrap(~region, scales = 'free_y', ncol = 2) +
+  labs(y = 'Mean Summer Clarity (m)', x = 'Year', color = 'Source') +
+  theme(strip.text = element_text(colour = 'white'),
+        legend.position = c(.75, .05),
+        legend.direction = 'horizontal',
+        axis.text.x = element_text(hjust = 1)) # c(0,0) bottom left, c(1,1) top-right.)
+
+g <- ggplot_gtable(ggplot_build(p1))
+strip_both <- which(grepl('strip-', g$layout$name))
+
+k <- 1
+for (i in strip_both[c(1,3:10)]) {
+j <- which(grepl('rect', g$grobs[[i]]$grobs[[1]]$childrenOrder))
+g$grobs[[i]]$grobs[[1]]$children[[j]]$gp$fill <- colors[k]
+k <- k+1
+}
+grid::grid.draw(g)
+
+ggsave('figures/NLA_TS_Comp.pdf', width = 5, height = 4.5, plot = g)
+
+
+## Compare NLA and Large Random Sample, way more small lakes in random sample
+lakes <- read_feather('out/NLA2012LakesFull.feather') %>%
+  mutate(sample = 'NLA.Sample') %>%
+  bind_rows(read_feather('out/EcoReg2000LakesFull.feather') %>% mutate(sample = 'Random.Sample')) %>%
+  st_as_sf(coords = c('long', 'lat'), crs = 4326)
+
+ggplot(lakes, aes(x = areasqkm, fill = sample)) + geom_density(alpha = .3) + scale_x_log10()
+
+# Generate trends for field values and join them to RS trends
+FieldMK <- fieldMean %>%
+  group_by(region) %>%
+  arrange(year) %>%
+  nest() %>%
+  mutate(mk = purrr::map(data, ~sens.slope(.$mean)),
+         sen.slope = purrr::map_dbl(mk, 'estimates'),
+         sen.slope = sen.slope*100,
+         p.value = purrr::map_dbl(mk, 'p.value'),
+         p.value = round(p.value, 5),
+         sig = ifelse(p.value < .01, '***', ifelse(p.value < .05, '**', ifelse(p.value < 0.1, '*', NA)))) %>%
+  select(-data, -mk)
+
+mk.full <- FieldMK %>%
+  mutate(source = 'In.Situ') %>%
+  bind_rows(read_feather('out/TS_Preds/NLA2012_cntr_summaryMK.feather') %>%
+              mutate(source = 'NLA.Sample')) %>%
+  bind_rows(read_feather('out/TS_Preds/EcoReg2000_cntr_summaryMK.feather') %>%
+              mutate(source = 'Random.Sample')) %>%
+    bind_rows(read_feather('out/TS_Preds/Over10_summaryMK.feather') %>%
+              mutate(source = 'Large.Lakes.Sample')) %>%
+  mutate(source = factor(source, levels = c('NLA.Sample', 'Random.Sample', 'Large.Lakes.Sample', 'In.Situ')))
+
+## Calculate the difference in trends
+trendDif <- mk.full %>%
+  select(region, sen.slope, source) %>%
+  spread(source, sen.slope) %>%
+  mutate(NLA.minus.Random = NLA.Sample - Random.Sample,
+         NLA.minus.Large.Lakes = NLA.Sample - Large.Lakes.Sample,
+         NLA.minus.In.Situ = NLA.Sample - In.Situ) %>%
+  gather(NLA.minus.Random, NLA.minus.Large.Lakes, NLA.minus.In.Situ, key = 'Group', value = 'Slope.Difference') %>%
+  mutate(sig = NA, p.value = NA, source = 'Difference') %>%
+  left_join(region %>% st_simplify(dTolerance = 500))
+
+lakeIDs <- read_feather(paste0('out/TS_Preds/NLA2012_cntr_',iteration,'.feather')) %>%
+  na.omit() %>% 
+  distinct(COMID) %>%
+  bind_rows(read_feather(paste0('out/TS_Preds/EcoReg2000_cntr_',iteration,'.feather')) %>%
+              na.omit() %>% 
+              distinct(COMID))
+
+# Plot up locations of sample lakes for NLA and random sample, Figure 2 panel A in paper
+p2 <- ggplot(region %>% st_simplify(dTolerance = 1000)) + geom_sf(aes(fill = region)) + 
+  geom_sf(data = lakes %>% filter(COMID %in% lakeIDs$COMID), size = .2, color = 'black', alpha = .4) + 
+  theme(axis.text.x = element_blank(),
+          axis.text.y = element_blank(),
+          axis.ticks = element_blank(),
+          rect = element_blank(),
+          panel.grid.major = element_line(color = 'transparent'),
+          plot.margin = margin(-2,0,-2, 0, 'cm'),
+        strip.text = element_text(face = 'bold'),
+        legend.position = 'none') +
+  scale_fill_viridis_d(name = "Region", begin = .2) + 
+  facet_wrap(~sample)
+
+ggsave('figures/SamplePointMaps.pdf', height = 3, width = 6, plot = p2)
+
+# Plot up the Mann Kendal results for each sample, Figure 4
+p2 <- mk.full %>%
+  filter(source != 'Large.Lakes.Sample') %>%
+  mutate(sen.slope = ifelse(sen.slope > 1, 1, sen.slope),
+         sen.slope = ifelse(sen.slope < -.5, -.5, sen.slope)) %>%
+  left_join(region %>% st_simplify(dTolerance = 500)) %>%
+  rowwise() %>%
+  mutate(coords.x = st_point_on_surface(geometry)[1],
+    coords.y = st_point_on_surface(geometry)[2]) %>%
+  #ungroup() %>%
+  ggplot() +
+    geom_sf(aes(fill = sen.slope, geometry = geometry), color = 'grey30') +
+    geom_text(aes(x = coords.x, y = coords.y, label = sig), size = 4, color = 'red') +
+    theme(axis.text.x = element_blank(),
+          axis.text.y = element_blank(),
+          axis.ticks = element_blank(),
+          rect = element_blank(),
+          panel.grid.major = element_line(color = 'transparent'),
+          legend.position = 'top',
+          plot.margin = margin(-1,0,-1, 0, 'cm')) +
+    #scale_fill_viridis_c(option = 'plasma', begin = .2, breaks = c(-.5,0,.5,1), labels = c('< -0.5', '0', '0.5',' > 1.0')) +
+    scale_fill_gradient2(low='#F56217', mid='#ffffff', high='#0B486B', midpoint = 0, breaks = c(-.5,0,.5,1), labels = c('< -0.5', '0', '0.5',' > 1.0')) +
+    labs(fill = 'Slope (cm/year)', x = '', y = '') +
+    guides(color = guide_legend(label = F)) +
+  facet_wrap(~source) +
+  theme(strip.text = element_text(face="bold"))
+
+p3 <- trendDif %>% filter(Group == 'NLA.minus.Random' | Group == 'NLA.minus.In.Situ') %>%
+  mutate(Slope.Difference = ifelse(Slope.Difference < -.5, -.5, Slope.Difference),
+         Slope.Difference = ifelse(Slope.Difference > .5, .5, Slope.Difference)) %>%
+  ggplot() +
+  geom_sf(aes(fill = Slope.Difference, geometry = geometry), color = 'grey30') +
+  theme(axis.text.x = element_blank(),
+        axis.text.y = element_blank(),
+        axis.ticks = element_blank(),
+        rect = element_blank(),
+        plot.margin = margin(-1,0,0, 0, 'cm'),
+        panel.grid.major = element_line(color = 'transparent'),
+        legend.position = 'right') +
+  scale_fill_gradient2(low='#a50026',mid='#ffffff', high='#313695', 
+                       midpoint = 0, breaks = c(-.5, -.25,0,.25,.5), labels = c('< -0.5','','0','','> 0.5')) +
+  facet_wrap(~Group)+
+  theme(strip.text = element_text(face="bold"))
+
+g <- grid.arrange(p2, p3, nrow = 2)
+
+ggsave('figures/SlopeCompsV2.png',plot = g, width = 6.5, height = 5, units = 'in')
+```
+
+## Look Percent Change over time and space
+
+```{r}
+### Calculate annual percent change
+p.dif <- bootstrapped.ts %>% group_by(region) %>% mutate(p.dif = ((mean/lag(mean))-1)*100)%>%
+  ungroup()
+
+p.dif %>% group_by(region) %>% summarise(iqr = IQR(p.dif, na.rm = T)) %>% arrange(iqr)
+
+##Look at correlations with percent change
+p.dif.cor <- p.dif %>%  
+  select(region, year, p.dif) %>%
+  spread(key = region, value = p.dif) %>%
+  filter(year > 1984) %>%
+  select(-year) %>%
+  cor(.)
+
+corrplot::corrplot.mixed(p.dif.cor)
+
+p.values <- p.dif %>%  
+  select(region, year, p.dif) %>%
+  spread(key = region, value = p.dif) %>%
+  filter(year > 1984) %>%
+  select(-year) %>%
+  corrplot::cor.mtest(.)
+
+png('figures/RegionalCorrs.png', height = 4, width = 4, units = 'in', res = 250)
+corrplot::corrplot(p.dif.cor, p.mat = p.values$p, insig = "label_sig",
+         sig.level = c(.01, .05, .1), pch.cex = .9, pch.col = "red", type = 'upper', order = 'hclust', method = 'color', tl.cex = .75)
+dev.off()
+
+## Find years where all regions where changing in the same direction
+year.change.counts <- bootstrapped.ts %>% group_by(region) %>% 
+  mutate(p.dif = ((mean/lag(mean))-1)*100, 
+         increase = ifelse(p.dif > 0 , 1,0), 
+         decrease = ifelse(p.dif < 0, 1, 0)) %>% group_by(year) %>% summarise(increase = sum(increase), decrease = sum(decrease))
+
+
+## Figure for AGU looking at distribution of percent change over time
+p1 <- p.dif %>%
+  ggplot(.,aes(x = region, y = p.dif)) + geom_violin(aes(fill = region)) + 
+  geom_boxplot(width=0.1, color = 'grey80', fill = 'grey60') + 
+  scale_fill_viridis_d(option = 'cividis', begin = .1, end = .9) +
+  geom_hline(aes(yintercept = 0), color = 'grey60') +
+  theme_bw() +
+  theme(axis.text.x = element_text(angle = 25, hjust = 1),
+        axis.title.x = element_blank(),
+        axis.title.y = element_blank(),
+        #axis.ticks.x = element_blank(),
+        legend.position = 'none') 
+  #labs(y = 'Yearly Percent Clarity Change')
+
+p.dif.meds <- bootstrapped.ts %>% group_by(region) %>% mutate(p.dif = ((mean/lag(mean))-1)*100) %>% group_by(year) %>% summarise(median = median(p.dif, na.rm = T)) %>%
+  mutate(trend = ifelse(median > 0, 'Increase','Decrease')) %>% na.omit()
+
+
+p.dif.quants <- bootstrapped.ts %>% group_by(region) %>% mutate(p.dif = ((mean/lag(mean))-1)*100, p.dif = round(p.dif, 2)) %>% 
+  summarise(quant25 = quantile(p.dif, .25, na.rm = T),
+            quant50 = quantile(p.dif, .5, na.rm = T),
+            quant75 = quantile(p.dif, .75, na.rm = T),
+            range25.75 = quant75-quant25)
+
+p2 <- bootstrapped.ts %>% group_by(region) %>% mutate(p.dif = ((mean/lag(mean))-1)*100) %>%
+  ungroup() %>% filter(year != 1984) %>% ggplot(., aes(x = factor(year), y = p.dif)) + 
+  geom_violin(fill = 'grey80') +
+  geom_point(data = p.dif.meds, aes(x = factor(year), y = median, color = trend)) + 
+  scale_color_manual(values = c('brown', 'blue'), name = 'Median Clarity Change') +
+  labs(x = 'Year') +
+  theme_bw() +
+  theme(axis.text.x = element_text(angle = 90, vjust = .5),
+        axis.title.y = element_blank(),
+        legend.position = c(.68,.9),
+        legend.direction = 'horizontal',
+        legend.background = element_blank())
+  
+g <- grid.arrange(p1, p2, nrow = 2, left = 'Yearly Percent Change')
+
+ggsave(plot = g, 'figures/AnnualPercentChange.png', width = 6.5, height = 4, units = 'in')
+```
+
+
+## Quick look at how many obs we're averaging over for each month
+
+```{r, include = F, eval = F}
+## Average lake observations per region/month
+monthCounts <- Preds.out %>%
+  filter(year < 2019,
+         month %in% c(5,6,7,8,9)) %>%
+  group_by(COMID, year, region) %>%
+  dplyr::summarize(count = n()) %>%
+  group_by(year, region) %>%
+  dplyr:: summarise(count.obs = sum(count),
+            count.lakes = n())
+
+#Make a 3 panel figure for how many lakes we observe each month and the total observations
+
+quantiles <- tibble(quant.label = factor(seq(10,90,10)), 
+                    quants = quantile(monthCounts$count.obs, c(seq(.1,.9,.1))))
+
+#How many total observations
+p1 <- monthCounts %>%
+  ggplot(., aes(x = count.obs)) +
+  geom_histogram(binwidth = 150, color = 'black') +
+  geom_vline(data = quantiles, aes(color = quant.label, xintercept = quants), size = 1, alpha = .6) +
+  #scale_x_continuous(breaks = pretty_breaks(n = 10)) +
+  scale_color_viridis_d()+
+  labs(x = 'Regional Observations Per Year', color = '10% Quantiles') +
+  theme_bw() +
+  theme(legend.position = 'none')
+
+quantiles <- tibble(quant.label = factor(seq(10,90,10)), 
+                    quants = quantile(monthCounts$count.lakes, c(seq(.1,.9,.1))))
+
+# How many lakes those observations are coming from
+p2 <- monthCounts %>%
+  ggplot(., aes(x = count.lakes)) +
+  geom_histogram(binwidth = 20, color = 'black', fill = 'grey80') +
+  geom_vline(data = quantiles, aes(color = quant.label, xintercept = quants), size = 1, alpha = .6) +
+  scale_color_viridis_d()+
+  #scale_x_continuous(breaks = pretty_breaks(n = 10)) +
+  labs(x = 'Regional Lake Count Per Year', color = '10% Quantiles') +
+  theme_bw() +
+  theme(legend.position = 'bottom')
+
+g <- grid.arrange(p1,p2, nrow = 2, heights = c(.3,.35))
+
+# How those observations are distributed across months
+p3 <- Preds.out %>%
+  filter(month %in% c(5:9)) %>%
+  group_by(region, month, year) %>%
+  summarise(count.obs = n()) %>%
+  group_by(region, month) %>%
+  summarise(count.obs = mean(count.obs)) %>%
+  ggplot(., aes(x = region, y = count.obs, fill = factor(month))) +
+  geom_col(position = 'dodge') +
+  scale_fill_viridis_d()+
+  labs(x = 'Region', y = 'Average Observations per Month', fill = 'Month') +
+  theme_bw() +
+  theme(legend.position = 'bottom',
+        axis.text.x = element_text(angle = 30, hjust = 1, vjust = 1))
+
+g <- grid.arrange(p1,p2, p3, nrow = 3, heights = c(.3,.35,.35))
+
+ggsave(plot = g, 'figures/MonthlyObs3Panel_IceFree.png', width = 6.5, height = 9, units = 'in')
+```
+
+## Compare centerpoint preds versus full like predictions for the supplemental
+
+```{r}
+cntr <- read_feather('out/TS_Preds/NLA2012_cntr_gbLinear.feather') %>%
+  select(system.index, COMID, date, Center.Pred = value) %>% 
+  mutate(Source = 'Center Point') %>%
+  inner_join(read_feather('out/TS_Preds/NLA2012_FullLake_gbLinear.feather') %>%
+               select(system.index, COMID, date, Full.Pred = value))
+
+ggplot(cntr, aes(x = Full.Pred, y = Center.Pred)) + geom_hex() + 
+  theme_bw() + 
+  scale_fill_viridis_c(trans = 'log10') +
+  labs(x = 'Full Lake Reflectance Predictions', y = 'Center Point Reflection Prediction') + 
+  geom_abline(color = 'red') + 
+  ggpubr::stat_regline_equation(vjust = 2.4) +
+  stat_poly_eq(aes(label =  paste(stat(adj.rr.label))),
+               formula = y~x, parse = TRUE, 
+               label.y = Inf, vjust = 1.3)
+
+ggsave('figures/CenterFullComp.png', width = 3.5, height =3 , units = 'in')
+```
+
+
+## Try to examine some national level correlates with NAPD and PRISM data
+
+```{r, include = F, eval = F}
+#Unzip and join all the prism data
+## Pull in PRISM data (originally downloaded through the PRISM ftp)
+##Everything is zipped, which is super annoying
+dezip <- function(path, var){
+  files <- list.files(path, pattern = '*.zip', full.names = T)
+  purrr::map(files, unzip, exdir = 'D:/PRISM_MeanTemp/unzipped')
+  }
+
+#Unzip files to local paths
+paths <- list.dirs('D:/PRISM_Precip', recursive = F)
+purrr::map(paths, dezip)
+
+paths <- list.dirs('D:/PRISM_MeanTemp', recursive = F)
+purrr::map(paths, dezip)
+
+## Reproject and simplify regions to match PRISM raster files for the spatial join
+regionNAD83 <- region %>% 
+  st_simplify(., dTolerance = 15000) %>%
+  st_transform(., 4269)
+
+ggplot(regionNAD83) + geom_sf(aes(fill = region))
+
+geo <- regionNAD83
+raster.path <- pathTemps[1]
+
+## Make function for pulling out summary mean values per region
+getMeans <- function(raster.path, geo){
+  geo <- as(geo, "Spatial")
+  image <- raster(raster.path)
+  name <- image@data@names
+  yearmonth <- str_split(name, pattern = '_')[[1]][5]
+  year = substr(yearmonth,1,4)
+  month = substr(yearmonth,5,6)
+  means <- extract(image, geo, fun = mean, na.rm = T, sp = T)
+  means <- means@data
+  colnames(means)[3] <- 'value'
+  means$year = year
+  means$month = month
+  return(means)
+}
+
+library(raster)
+## It's pretty slow, so lets try to put it all in parrallel
+pathTemps <- list.files('D:/PRISM_MeanTemp/unzipped', pattern = '[0-9]{6}_bil.bil$', full.names = T)
+pathPrecip <- list.files('D:/PRISM_Precip/unzipped', pattern = '[0-9]{6}_bil.bil$', full.names = T)
+plan(multiprocess(workers = availableCores()-4))
+
+prismTemps <- pathTemps %>%
+  future_map_dfr(getMeans, geo = regionNAD83, .progress = T) %>%
+  rename_all(tolower) %>%
+  mutate_at(vars(year,month), as.numeric) %>%
+  filter(month %in% c(5:9)) %>%  
+  group_by(region, year) %>%
+  summarise(value = mean(value, na.rm = T))
+
+prismPrecip <- pathPrecip %>%
+  future_map_dfr(getMeans, geo = regionNAD83, .progress = T) %>%
+  rename_all(tolower) %>%
+  mutate_at(vars(year,month), as.numeric) %>%
+  filter(month %in% c(5:9)) %>%  
+  group_by(region, year) %>%
+  summarise(value = mean(value, na.rm = T))
+
+plan(sequential)
+
+write_feather(prismTemps, paste0('out/PRISMTemp_',area,'.feather'))
+write_feather(prismPrecip, paste0('out/PRISMPrecip_',area,'.feather'))
+
+#raster and furrr randomly don't play well together sometimes.  If the above fails go the slow way.
+
+prismTemps <- pathTemps %>%
+  map_dfr(getMeans, geo = regionNAD83)
+
+prismPrecip <- pathPrecip %>%
+  map_dfr(getMeans, geo = regionNAD83)
+
+# Detach raster package because it doesn't play nice with dplyr
+detach("package:raster", unload = TRUE)
+```
+
+
+```{r, include = F, eval = F}
+prismTemps <- read_feather('out/PRISMTemp_eco.feather')
+
+prismPrecip <- read_feather('out/PRISMPrecip_eco.feather')
+
+## Pull in the NADP Data downloaded from NADP site
+nadp.sites <- read.csv('../aquaModel/in/NADP/siteList.csv') %>%
+  filter(!is.na(lat)) %>%
+  st_as_sf(coords = c('long','lat'), crs = 4326) %>%
+  st_transform(.,st_crs(region)) %>%
+  st_join(region)
+  
+mapView(nadp.sites)
+
+# Calculate yearly values
+nadp.yearly <- read.csv('../aquaModel/in/NADP/NTN-All-m.csv') %>%
+  left_join(nadp.sites, by = 'SiteID') %>%
+  rename(year = yr) %>%
+  select(-c(Criteria1:Criteria3, fullChemLab, svol, ppt, daysSample, elev)) %>%
+  filter(month %in% c(5:9)) %>%
+  group_by(region, year) %>%
+  dplyr::summarize_if(is.numeric, mean, na.rm = T)
+  
+
+##Teleconnection Indexes
+tc <- read.csv('../aquaModel/in/IsoPdo.csv') %>%
+  mutate(year = as.numeric(substr(YrMonth, 1,4)),
+         month = as.numeric(substr(YrMonth, 5,6))) %>%
+  filter(month %in% c(5:9)) %>%
+  group_by(year) %>%
+  summarise_at(vars(PDO, PNA, SOI, NAO), mean)
+
+## Make a master dataset of all the stl, nadp, and prism data.
+bootstrapped.full <- bootstrapped.ts %>%
+  left_join(nadp.yearly) %>%
+  left_join(prismTemps %>% rename(Temp = value)) %>%
+  left_join(prismPrecip %>% rename(Precip = value)) %>%
+  left_join(tc)
+
+write_feather(bootstrapped.full, paste0('out/bootstrappedFull_',iteration,'.feather'))
+```
+
+
+```{r}
+bootstrapped.full <- read_feather(paste0('out/bootstrappedFull_',iteration,'.feather'))
+
+#Look at overall correlation
+corr.t <- bootstrapped.full %>%
+  na.omit() %>%
+  select(region, mean, NH4, NO3, pH, PNA, NAO, SO4, PDO, Precip, Temp) %>%
+  gather(NH4:Temp, key = 'Metric', value = 'Conc') %>%
+  group_by(region, Metric) %>%
+  nest() %>%
+  mutate(cors = purrr::map(data, ~cor.test(x = .x$mean, y = .x$Conc)),
+         cor = purrr::map(cors, 'estimate'),
+         cor = purrr::map_dbl(cor, 'cor'),
+         p.value = purrr::map_dbl(cors, 'p.value')) %>%
+  select(-c(data, cors))%>%
+  mutate_at(vars(cor:p.value), round, digits =3) %>%
+  ungroup() %>%
+  mutate(sig = ifelse(p.value < .05, 'yes', NA),
+         Metric = factor(Metric, levels = c('Temp', 'Precip', 'NO3', 'NH4', 'SO4', 'pH', 'PNA', 'PDO', 'NAO')),
+         signal = 'Trend') %>%
+  left_join(region)
+
+corr.t %>%
+  filter(Metric %in% c('SO4', 'Temp', 'Precip', 'PDO')) %>%
+  st_as_sf() %>%
+  st_simplify(., dTolerance = 1000) %>%
+  ggplot(.) +  geom_sf(aes(fill = cor, color = sig)) + 
+  facet_wrap(~Metric) + 
+  scale_fill_gradient2(low = 'red', high = 'blue', mid = 'grey', midpoint = 0, breaks = c(-.5,-.25,0,.25,.5), labels = c('-0.5', '-0.25', '0', '0.25', '0.5')) +
+  scale_color_manual(values = 'black', na.translate = F) +
+  theme_bw() +
+  theme(axis.text.x = element_blank(),
+        axis.text.y = element_blank(),
+        axis.ticks = element_blank(),
+        #rect = element_blank(),
+        legend.position = 'bottom') +
+  labs(fill = 'Correlation\nCoefficient', color = 'P.Value < 0.05',
+       title = 'Potential Correlates with Overall Trend') +
+  guides(color = guide_legend(label = F))
+
+ggsave('figures/RegionalCorrelates.png', height = 5.5, width = 6, units = 'in')
+```
