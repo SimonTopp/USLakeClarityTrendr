@@ -20,7 +20,6 @@ mnNHDPoly <- st_read('in/MN_LB_Comparison/NHDPlusSR/NHDPLus09/NHDSnapshot/Hydrog
   rbind(st_read('in/MN_LB_Comparison/NHDPlusMS/NHDPLus07/NHDSnapshot/Hydrography/NHDWaterbody.shp')) %>% 
   rbind(st_read('in/MN_LB_Comparison/NHDPlusGL/NHDPLus04/NHDSnapshot/Hydrography/NHDWaterbody.shp'))
 
-
 ## Join NHD Lakes with lakebrowser lakes.
 mnNHD <- mnNHDPoly %>%
   st_transform(4326) %>% st_centroid() %>% st_join(ecoregs, join = st_within) %>%
@@ -44,7 +43,6 @@ centerJoin <- rbind(centerJoin[[1]], centerJoin[[2]], centerJoin[[3]], centerJoi
 ### Filter MNPoly to those that overlap with LakeBrowser
 mnOut <- mnNHDPoly %>% filter(COMID %in% centerJoin$COMID) %>% st_zm()
 
-  
 mnOut %>% group_by(FTYPE) %>% summarise(count = n())
 
 ## For some reason regional NHD data doesn't have the full suite of attributes
@@ -300,7 +298,7 @@ mae(mnWide$manual, mnWide$RS)
 
 ## Initial Comparison Code
 ```{r}
-##Compare whole lake to lake center
+##As an aside compare, whole lake to lake center
 center <- read_feather(paste0('out/TS_Preds/NLA2012_cntr_',iteration,'.feather')) %>% mutate(sample = 'NLA') %>%
   bind_rows(read_feather(paste0('out/TS_Preds/Over10_',iteration,'.feather')) %>% mutate(sample = 'Over10')) %>%
   bind_rows(read_feather(paste0('out/TS_Preds/EcoReg2000_cntr_',iteration,'.feather')) %>%
@@ -319,7 +317,7 @@ ggplot(centerComps, aes(x = center, y = wholeLake)) +
 
 ## Compare individual preds against each other.
 sum.means <- predicted %>%
-  select(-geometry) %>%
+  #select(-geometry) %>%
   filter(month %in% c(8,9)) %>%
   group_by(COMID, year) %>%
   summarise(Topp.mean = mean(value))
@@ -370,7 +368,7 @@ ggplot(obs.join, aes(x = LB.mean, y = Topp.mean)) + geom_hex() +
   facet_wrap(~year) + 
   labs(x = 'LakeBrowser Prediction', y = 'This Study Prediction') 
 
-ggsave('figures/__MN_LakeBasedComps.png', width = 5, height =3.5, units = 'in')
+ggsave('figures/__MN_LakeBasedComps.png', width = 5.75, height =3.5, units = 'in')
 
 yearlyMetrics <- obs.join %>%
   na.omit() %>%

@@ -966,6 +966,13 @@ varTable %>%
   column_spec(1, border_right = T) %>%
   row_spec(c(2,3,4,5,9,10,27,29, 30, 16, 20), bold = T) %>%
   save_kable('figures/FigTable.png', height = 9)
+
+
+## Make a table summarizing sample sizes
+sampTable <- tibble(Sample = c('2012 National Lake Assessment', 'Large Random Sample', 'Lakes Over 10 sq km', 'Total Unique Lakes', 'Total Lakes with >25 years of Observations'), Initial.Count = c(1038, 18000, 1170, 19964, 8897), `Post.QAQC.count` = c(1029, 13362, 1105, 14971, 8897)) %>%
+  kable(col.names = c('Sample', 'Initial Count', 'Post QA/QC Count'),
+        format.args = list(big.mark = ","), align = 'c') %>%
+  kable_styling()
 ```
 
 
@@ -975,7 +982,7 @@ varTable %>%
 over10NLA <- lake.join %>% filter(areasqkm > 10)
 
 pullComp <- read_feather(paste0('out/TS_Preds/NLA2012_cntr_',iteration,'.feather')) %>%
-  bind_rows(read_feather(paste0('out/TS_Preds/NLA2012_FullLake_',iteration,'.feather'))) %>% filter(COMID %in% over10NLA$COMID)
+  bind_rows(read_feather(paste0('out/TS_Preds/NLA2012_FullLake_',iteration,'.feather')) %>% mutate(lakeSamp = 'NLA2012_FullLake')) %>% filter(COMID %in% over10NLA$COMID)
 
 #filter where we have preds for both
 counts <- pullComp %>%

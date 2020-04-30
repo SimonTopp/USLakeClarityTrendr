@@ -343,11 +343,11 @@ huc.sr.sf <- st_join(hucs,sr.sf) %>%
   left_join(hucs, by = 'HUC_8')
 
 ggplot() +
-  geom_sf(data = usa, fill = 'grey20') + 
-  geom_sf(data = huc.sr.sf,aes(fill=Overpasses), color=NA)  + 
-  scale_fill_gradient2(low='#a50026',mid='#abd9e9', high='#313695',na.value='black',midpoint = 2, trans='log10', name = 'Cloud Free Overpasses') +
+  geom_sf(data = usa, aes(geometry = geometry), fill = 'grey20') + 
+  geom_sf(data = huc.sr.sf,aes(fill=Overpasses, geometry = geometry), color=NA)  + 
+  scale_fill_gradient2(low='#a50026',mid='#abd9e9', high='#313695',na.value='black',midpoint = 2, trans='log10', name = 'No. of Coincident\nCloud Free Observations') +
   theme_bw() +
-  ggtitle('Cloud free coincident field and Landsat Observations') +
+  #ggtitle('Cloud free coincident field and Landsat Observations') +
   theme(legend.position = 'bottom', 
         legend.direction = 'horizontal',
         panel.grid.major = element_line(color = 'white'),
@@ -357,7 +357,6 @@ ggplot() +
         plot.title = element_text(hjust = .5))
 
 ggsave('figures/MungedOverpasses.png', width = 6, height = 5, units = 'in', dpi = 300)
-
 ```
 
 ```{r}
