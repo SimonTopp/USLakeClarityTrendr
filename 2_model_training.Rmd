@@ -87,35 +87,6 @@ features <- ffsResults[ffsResults$RMSE == min(ffsResults$RMSE),] %>%
 
 oneHot <- onehot(df %>% select(features))
 df.encoded <- predict(oneHot, df %>% select(features)) %>% as.data.frame(.) 
-
-# Set up a tune grid for a base model
-# 
-# grid_default <- expand.grid(
-#   nrounds = 100,
-#   max_depth = 4,
-#   eta = 0.3,
-#   gamma = 0,
-#   colsample_bytree = .8,
-#   min_child_weight = .8,
-#   subsample = 1
-# )
-# 
-# #Set up a cluster to run everything in parrallel
-# cl <- makePSOCKcluster(availableCores()/2)
-# registerDoParallel(cl)
-# 
-# train_control <- caret::trainControl(method="cv", savePredictions = T, 
-#                           returnResamp = 'final', index = folds$index, 
-#                           indexOut = folds$indexOut)
-# 
-# xgb_base <- caret::train(
-#   x = df.encoded,
-#   y = df$value,
-#   trControl = train_control,
-#   tuneGrid = grid_default,
-#   method = "xgbTree",
-#   verbose = TRUE
-# )
 ```
 
 # Grid search for GBLinear
