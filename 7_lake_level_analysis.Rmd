@@ -10,7 +10,7 @@ editor_options:
 
 ```{r}
 ## Pull in original predictions for each lake
-summ.meds.full <- read_feather(paste0('out/TS_Preds/NLA2012_cntr_',iteration,'.feather')) %>% mutate(sample = 'NLA') %>% filter(COMID %in% nla.2012$COMID) %>%
+summ.meds.full <- read_feather(paste0('out/TS_Preds/NLA2012_cntr_',iteration,'.feather')) %>% mutate(sample = 'NLA') %>% #filter(COMID %in% nla.2012$COMID) %>%
   bind_rows(read_feather(paste0('out/TS_Preds/Over10_',iteration,'.feather')) %>% mutate(sample = 'Over10')) %>%
   bind_rows(read_feather(paste0('out/TS_Preds/EcoReg2000_cntr_',iteration,'.feather')) %>%
               mutate(sample = 'Random')) %>%
@@ -37,7 +37,7 @@ check <- lake.join %>% filter(sample == 'NLA'|sample == 'Random', COMID %in% sum
 counts <- summ.meds.full %>%
   group_by(COMID, region) %>%
   summarise(count = n()) %>%
-  filter(count > 1)
+  filter(count > 25)
 
 summ.meds.full <- summ.meds.full %>% filter(COMID %in% counts$COMID)
 
