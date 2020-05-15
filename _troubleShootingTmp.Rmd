@@ -133,3 +133,58 @@ bootstrapped.ts %>%
   facet_wrap(~region, scales = 'free', ncol = 2)
 ```
 
+```{r}
+check <- st_read('/Users/simontopp/Downloads/Sentinel-2_Descending_Orbits_shape_file/Sentinel-2_Descending_Orbit_Shape_File.shp')
+
+st_layers('/Users/simontopp/Downloads/NHDPlusNationalData/NHDPlusV21_National_Seamless_Flattened_Lower48.gdb')
+
+check <- st_read('/Users/simontopp/Downloads/NHDPlusNationalData/NHDPlusV21_National_Seamless_Flattened_Lower48.gdb', layer = 'NHDWaterbody')
+
+check2 <- check %>% mutate_at(vars(MeanDepth, LakeVolume, LakeArea), ~format(round(., 5), nsmall =5 ))
+check2$ELEVATION[check2$ELEVATION == -99999999] = -9999
+
+st_write(check2, 'in/NHD/NHDPlusV2_NHDWaterbodies.shp')
+
+nhd <- st_read('in/NHD/NHDPLusV2_NHDWaterbodies.shp')
+
+swotViz <- nhd %>% filter(LakeAre > 62500)
+
+test <- swotViz[1,]
+
+check <- test %>% st_bbox(crs = 4269)
+points <- st_sfc(st_point(c(check[1],check[2])),
+                 st_point(c(check[1],check[4])),
+                 st_point(c(check[3],check[2])), crs = 4269)
+
+
+calcDim <- function(i){
+  bb <- st_bbox(i, crs = 4269)
+  points <- st_sfc(st_point(c(bb[1],bb[2])),
+                 st_point(c(bb[1],bb[4])),
+                 st_point(c(bb[3],bb[2])), crs = 4269)
+  width <- st_distance(points[1],points[3])[1] %>% round(1)
+  height <- st_distance(points[1],points[2])[1] %>% round(1)
+  return(list(width, height))
+}
+
+calcDim(swotViz$geometry[3])
+
+plan(multiprocess)
+test <- swotViz %>%
+  mutate(dims = furrr::future_map(geometry, calcDim, .progress = T),
+         width = purrr::map_dbl(dims, 1),
+         height = purrr::map_dbl(dims,2)) %>%
+  select(-dims)
+plan(sequential)
+
+swotViz<- test %>% filter(width > 300 & height > 300)
+
+
+st_distance(point[1],point[2])[1]
+st_distance(points[1],points[3])[1]
+
+st_is_longlat(st_point(c(check[1],check[2]), dim = 'XY'))
+
+
+```
+
