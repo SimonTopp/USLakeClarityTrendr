@@ -57,6 +57,10 @@ mk <- summ.meds.full %>%
   filter(!is.na(Size.Group))
 
 #write_feather(mk, 'out/LakeLevelMK.feather' )
+```
+
+
+```{r}
 mk <- read_feather('out/LakeLevelMK.feather')
 
 # Get median trend by size class.
@@ -98,6 +102,17 @@ cor.test(mk$sen.slope,mk$areasqkm)
 #Look at the distribution of clarity change across in-network and out-of-network lakes, no
 ggplot(mk, aes(x = sen.slope)) + geom_density(alpha = .4, aes(fill = factor(inStreamCat)))
 
+# Look at reservoirs vs natural lakes
+ggplot(mk %>% left_join(mk.ave), aes(x = ftype, y = sen.slope, group = ftype))  +
+  geom_violin() + 
+  geom_boxplot(width = .1, fill = 'grey60') +
+  geom_hline(yintercept = 0, color = 'red') +
+  #scale_fill_viridis_c('Number of\nLakes', option = 'plasma', end = .8, trans = 'log10') +
+  coord_cartesian(ylim = c(-5,5))+
+  labs(x = 'Lake Type', y = 'Slope Distribution (cm/year)', title = 'Slope Distribution by lake Type') +
+  theme_bw()
+wilcox.test(mk$sen.slope[mk$ftype == 'LakePond'], mk$sen.slope[mk$ftype == 'Reservoir'], conf.int = T)
+
 mk %>% group_by(inStreamCat) %>% summarise(mean = mean(sen.slope), med = median(sen.slope))
 wilcox.test(mk$sen.slope[mk$inStreamCat == 0], mk$sen.slope[mk$inStreamCat == 1], conf.int = T)
 
@@ -114,7 +129,7 @@ ggplot(lagos.secchi, aes(x = lake_area_ha)) + geom_density() + scale_x_log10()
 mean(lagos.secchi$areasqkm)
 median(lagos.secchi$areasqkm)
 
-## Quick look at population density tfollowing up on Stets et al 2020.
+## Quick look at population density to following up on Stets et al 2020.
 ## Look at all lakes following up on Stets et al 2020
 #Coarse
 pDense <- mk %>% 
@@ -156,6 +171,24 @@ wilcox.test(popGroups$sen.slope[popGroups$pDens == '[0-20]'], popGroups$sen.slop
 wilcox.test(popGroups$sen.slope[popGroups$pDens == '[0-20]'], conf.int = T)
 
 
+##Look at population density vs lakesize to make sure we're not just showing two correlated things.
+ggplot(mk, aes(x = PopDen2010Cat, y = areasqkm)) + geom_point() +
+  scale_x_continuous(trans = 'log10') +
+  scale_y_continuous(trans = 'log10') +
+  stat_poly_eq(aes(label =  paste(stat(adj.rr.label))),
+               formula = y~x, parse = TRUE, 
+               label.y = Inf, vjust = 1.3)
+
+ggplot(popGroups, aes(x = pDens, y = areasqkm))  +
+  geom_violin() + 
+  geom_boxplot(width = .1, fill = 'grey60') +
+  geom_hline(yintercept = 0, color = 'red') +
+  scale_y_continuous(trans = 'log10') +
+  #labs(x = 'Population Density Quantile', y = 'Slope Distribution (cm/year)') +
+  theme_bw()
+
+cor.test(mk$PopDen2010Cat, mk$areasqkm)
+summary(lm(areasqkm~PopDen2010Cat, data = mk))
 ## Just plot up the significant trends of individual lakes to look at nation wide patterns
 ggplot() +
   geom_sf(data = region %>% st_simplify(dTolerance = 1000)) +

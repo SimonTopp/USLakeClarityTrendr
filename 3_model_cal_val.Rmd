@@ -58,7 +58,8 @@ p1 <- output.full %>% mutate(Size.Group = cut(areasqkm, breaks = c(-1,.1,1,10,10
                formula = y~x, parse = TRUE, 
                label.y = Inf, vjust = 1.1, size = 3) +
   theme_bw() +
-  labs(title = 'Hold-Out Validation by Lake Size (sq. km)', x = 'Actual', y = 'Predicted', tag = 'A)') + facet_wrap(~Size.Group)
+  ylim(0,10) +
+  labs(title = 'Hold-Out Validation by: Lake Size (sq. km)', x = 'Actual', y = 'Predicted', tag = 'A)') + facet_wrap(~Size.Group)
 
 ## Validation by satellite
 p2 <- output.full %>% 
@@ -70,23 +71,40 @@ p2 <- output.full %>%
   stat_poly_eq(aes(label =  paste(stat(adj.rr.label))),
                formula = y~x, parse = TRUE, 
                label.y = Inf, vjust = 1.1, size = 3) +
-  labs(title = 'Hold-Out Validation by Sensor', x = 'Actual', y = 'Predicted', tag = 'B)') +
+  labs(title = 'Sensor', x = 'Actual', y = 'Predicted', tag = 'B)') +
   theme_bw() +
+  ylim(0,10) +
   facet_wrap(~sat, nrow = 1)
 
+## Look at Error between LAGOS and WQP obs per reviewer request.
+p3 <- output.full %>% 
+  ggplot(aes(x = Actual, y = Predicted)) + 
+  geom_hex(aes(fill = ..count..)) + 
+  scale_fill_viridis(name = 'Point\nCount', trans = 'log10') + 
+  geom_abline(color = 'red') + 
+  stat_poly_eq(aes(label =  paste(stat(adj.rr.label))),
+               formula = y~x, parse = TRUE, 
+               label.y = Inf, vjust = 1.1, size = 3) +
+  labs(title = 'Data Source', x = 'Actual', y = 'Predicted', tag = 'C)') +
+  theme_bw() +
+  facet_wrap(~source, nrow = 1)
+
+
 ## By year
-p3 <- output.full %>% group_by(year) %>% summarise(bias = bias(Actual, Predicted)) %>%
+p4 <- output.full %>% group_by(year) %>% summarise(bias = bias(Actual, Predicted)) %>%
   ggplot(aes(x = year, y = bias)) + 
   geom_point() + geom_line() + 
   geom_smooth(method = 'lm') +
   theme_bw() + 
-  labs(title = 'Hold-Out Bias by Year', tag = 'C)', x = 'Year', y = 'Bias (Actual-Predicted)') +
+  labs(title = 'Hold-Out Bias by Year', tag = 'D)', x = 'Year', y = 'Bias (Actual-Predicted)') +
   ggpubr::stat_regline_equation(label.x.npc = 'middle', label.y.npc  = 'top')
 
-layout <- rbind(c(1,1,1), c(1,1,1),c(1,1,1),c(2,2,2),c(2,2,2),c(3,3,NA), c(3,3,NA))
-g <- grid.arrange(p1,p2,p3, layout_matrix = layout)
+layout <- rbind(c(1,1,1), c(1,1,1),c(1,1,1),c(2,2,2),c(2,2,2),c(3,3,NA), c(3,3,NA),c(4,4,NA), c(4,4,NA))
+g <- grid.arrange(p1,p2,p3,p4, layout_matrix = layout)
 
-ggsave('figures/ValidationBreakDown.png', width = 6, height = 8, units = 'in', plot = g)
+ggsave('figures/ValidationBreakDown.png', width = 5.5, height = 9.5, units = 'in', plot = g)
+
+
   
 ##look for errors associated with certain things
 output.full %>% ggplot(., aes(x = residual, y = AOD)) + geom_hex()
