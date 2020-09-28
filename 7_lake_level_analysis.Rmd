@@ -113,6 +113,9 @@ ggplot(mk %>% left_join(mk.ave), aes(x = ftype, y = sen.slope, group = ftype))  
   theme_bw()
 wilcox.test(mk$sen.slope[mk$ftype == 'LakePond'], mk$sen.slope[mk$ftype == 'Reservoir'], conf.int = T)
 
+## Look at res breakdown by region
+ggplot(mk, aes(x = ftype)) + geom_bar() + facet_wrap(~region) + scale_y_log10()
+
 mk %>% group_by(inStreamCat) %>% summarise(mean = mean(sen.slope), med = median(sen.slope))
 wilcox.test(mk$sen.slope[mk$inStreamCat == 0], mk$sen.slope[mk$inStreamCat == 1], conf.int = T)
 
