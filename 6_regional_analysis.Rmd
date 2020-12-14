@@ -170,12 +170,76 @@ summaryMK <- bootstrapped.ts %>%
          sig = ifelse(p.value < .01, '***', ifelse(p.value < .05, '**', ifelse(p.value < 0.1, '*', NA)))) %>%
   select(-data, -mk)
 
+
+## Do it again excluding Mt Pinatubo years to ensure they aren't driving our trends (even if we don't think they're an artifact)
+summaryMK.mp <- bootstrapped.ts %>% filter(!year %in% c(1991,1992,1993)) %>%
+  na.omit() %>%
+  group_by(region) %>%
+  arrange(year) %>%
+  nest() %>%
+  mutate(mk = purrr::map(data, ~sens.slope(.$mean)),
+         sen.slope = purrr::map_dbl(mk, 'estimates'),
+         sen.slope = sen.slope*100,
+         #conf95 = purrr::map(mk, 'conf.int'),
+         p.value = purrr::map_dbl(mk, 'p.value'),
+         p.value = round(p.value, 5),
+         sig = ifelse(p.value < .01, '***', ifelse(p.value < .05, '**', ifelse(p.value < 0.1, '*', NA)))) %>%
+  select(-data, -mk)
+
+mk.comps <- summaryMK %>% mutate(series = 'Full Series (1984-2018)') %>%
+  bind_rows(summaryMK.mp %>% mutate(series = 'Filtered (1991-1993 Omitted)')) %>%
+  mutate(series = factor(series, levels = c('Full Series (1984-2018)', 'Filtered (1991-1993 Omitted)')))
+
+mk.comps.diff <- tibble(region = summaryMK$region, SlopeDiff = summaryMK$sen.slope - summaryMK.mp$sen.slope)
+
+mk.comps %>%
+  left_join(region %>% st_simplify(dTolerance = 1000)) %>%
+  rowwise() %>%
+  mutate(coords.x = unlist(st_point_on_surface(geometry))[1],
+    coords.y = unlist(st_point_on_surface(geometry))[2]) %>%
+  ungroup() %>%
+  ggplot(.) +
+    geom_sf(aes(fill = sen.slope, geometry = geometry)) +
+    geom_text(aes(x = coords.x, y = coords.y, label = sig), size = 4, color = 'red') +
+    scale_color_manual(values = 'red', breaks = 'yes') +
+    scale_fill_gradient2(low='#F56217', mid='#ffffff', high='#0B486B')+
+    labs(fill = 'Slope (cm/year)', x= '', y = '') +
+    guides(color = guide_legend(label = F)) +
+    theme(axis.text.x = element_blank(),
+          axis.text.y = element_blank(),
+          axis.ticks = element_blank(),
+          rect = element_blank(),
+          panel.grid.major = element_line(color = 'transparent'),
+          strip.text = element_text(face = 'bold'),
+          legend.position = 'bottom') +
+    facet_wrap(~series)
+
+ggsave('figures/TS_9193_Omitted.png', dpi = 600, width = 6.5, height = 4, units = 'in')
+
+mk.comps.diff <- mk.comps.diff <- tibble(region = summaryMK$region, SlopeDiff = summaryMK$sen.slope - summaryMK.mp$sen.slope)
+
+mk.comps.diff %>%
+  left_join(region %>% st_simplify(dTolerance = 1000)) %>%
+  ggplot(.) +
+    geom_sf(aes(fill = SlopeDiff, geometry = geometry)) +
+    scale_fill_gradient2(low='#F56217', mid='#ffffff', high='#0B486B')+
+    labs(fill = 'Slope Difference (cm/year)', x = '', y = '') +
+    theme(axis.text.x = element_blank(),
+          axis.text.y = element_blank(),
+          axis.ticks = element_blank(),
+          rect = element_blank(),
+          panel.grid.major = element_line(color = 'transparent'),
+          strip.text = element_text(face = 'bold'),
+          legend.position = 'bottom') 
+
+rm(mk.comps, summaryMK.mp, mk.comps.diff)
+
 ## Quick MK results plot, final figure is below.
 summaryMK %>%
   left_join(region %>% st_simplify(dTolerance = 1000)) %>%
   rowwise() %>%
-  mutate(coords.x = st_point_on_surface(geometry)[1],
-    coords.y = st_point_on_surface(geometry)[2]) %>%
+  mutate(coords.x = unlist(st_point_on_surface(geometry))[1],
+    coords.y = unlist(st_point_on_surface(geometry))[2]) %>%
   ungroup() %>%
   ggplot(.) +
     geom_sf(aes(fill = sen.slope, geometry = geometry)) +

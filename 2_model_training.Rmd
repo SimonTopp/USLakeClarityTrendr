@@ -89,7 +89,7 @@ oneHot <- onehot(df %>% select(features))
 df.encoded <- predict(oneHot, df %>% select(features)) %>% as.data.frame(.) 
 ```
 
-# Grid search for GBLinear
+# Grid search for hyperparameters
 
 ```{r}
 

@@ -21,7 +21,6 @@ evals <- output %>%
 
 evals %>% kable(digits = 5) %>% kable_styling() %>% scroll_box(width = '4in')
 
-
 ggplot(output, aes(x = Actual, y = Predicted)) + 
   geom_hex(aes(fill = ..count..)) + 
   scale_fill_viridis(name = 'Point\nCount', trans = 'log10') + 
@@ -32,7 +31,7 @@ ggplot(output, aes(x = Actual, y = Predicted)) +
   #scale_x_continuous(trans = 'log10', labels = scales::comma) +
   #scale_y_continuous(trans = 'log10', labels = scales::comma) +
   #coord_equal(ratio = 1) +
-  labs(title = 'Hold-Out Validation', subtitle = 'Red line is 1:1', x = 'Actual', y = 'Predicted')
+  labs(title = 'Full Validation', subtitle = 'Red line is 1:1', x = 'Actual', y = 'Predicted')
 
 ggsave('figures/ModelValidation.png', width = 4, height = 3.5, units = 'in')
 
@@ -48,6 +47,42 @@ output.full <- output %>%
          year = year(date),
          month = month(date))
 
+## Quick look at validation metrics from 91-93
+evals_9193 <- output.full %>% filter(year %in% c(1991, 1992,1993)) %>%
+  summarise(rmse = rmse(Actual, Predicted),
+            mae = mae(Actual, Predicted),
+            mape = mape(Actual, Predicted),
+            bias = bias(Actual, Predicted),
+            p.bias = percent_bias(Actual, Predicted),
+            smape = smape(Actual, Predicted))
+
+evals_9193
+evals
+
+tableGrob(evals_9193 %>% 
+             select(mae, mape, bias) %>% 
+             mutate_all(round, 3), rows = NULL)
+
+tableGrob(evals %>% 
+             select(mae, mape, bias) %>% 
+             mutate_all(round, 3), rows = NULL)
+
+ggplot(output.full %>% filter(year %in% c(1991, 1992,1993)), aes(x = Actual, y = Predicted)) + 
+  geom_hex(aes(fill = ..count..)) + 
+  scale_fill_viridis(name = 'Point\nCount', trans = 'log10') + 
+  geom_abline(color = 'red') + 
+  stat_poly_eq(aes(label =  paste(stat(adj.rr.label))),
+               formula = y~x, parse = TRUE, 
+               label.y = Inf, vjust = 1.3) +
+  #scale_x_continuous(trans = 'log10', labels = scales::comma) +
+  #scale_y_continuous(trans = 'log10', labels = scales::comma) +
+  #coord_equal(ratio = 1) +
+  labs(title = '1991-1993 Validation', subtitle = 'Red line is 1:1', x = 'Actual', y = 'Predicted')
+
+
+# g <- grid.arrange(p3,p1,p4,p2, nrow = 2, heights = c(1,.3))
+# ggsave('figures/val_fullV9193.png', plot = g, width = 6.5, height = 4, units = 'in', dpi = 600)
+
 ## Secondary Validation figure
 ## Look at validation by lake size
 p1 <- output.full %>% mutate(Size.Group = cut(areasqkm, breaks = c(-1,.1,1,10,100,100000), labels = c('<.1','.1-1','1-10', '10-100', '>100'))) %>% ggplot(aes(x = Actual, y = Predicted)) + 
@@ -60,7 +95,8 @@ p1 <- output.full %>% mutate(Size.Group = cut(areasqkm, breaks = c(-1,.1,1,10,10
   #coord_fixed() +
   theme_bw() +
   theme(aspect.ratio = 1) +
-  labs(title = 'Hold-Out Validation by: Lake Size (sq. km)', x = 'Actual', y = 'Predicted', tag = 'A)') + facet_wrap(~Size.Group)
+  labs(title = 'Hold-Out Validation by: Lake Size (sq. km)', x = 'Actual', y = 'Predicted', tag = 'A)') +
+  facet_wrap(~Size.Group)
 
 ## Validation by satellite
 p2 <- output.full %>% 
@@ -170,8 +206,92 @@ model$modelInfo$varImp(model$finalModel) %>%
   labs(title = 'Feature Importance', y = 'Importance (Model Gain)') 
 
 ggsave('figures/FeatImp.png', width = 3.5, height = 3, units = 'in')
-model$modelInfo$varImp(model$finalModel) 
 ```
+
+## Generate ALE values to examine predictor influences on the model
+
+```{r}
+library(iml)
+## Filter to training data and plug it all into the interpretable machine learning environment
+data <- srMunged %>% filter(!UniqueID %in% output$UniqueID) %>%  dplyr::select(all_of(features),value) %>% na.omit()
+predictor <- Predictor$new(model, data = data %>% dplyr::select(-value), y = data$value)
+
+#Generate ALE values
+effs <- FeatureEffects$new(predictor)
+effs.df <- do.call('rbind', effs$results)
+
+# Rename with human readable names
+name.changer <- tibble(.feature = features, names.New = c('Dominant Wavelength (FUI)','Mean Temperature', 'Blue/Green', 'Lake Depth', 'NIR/Red', 'Wetland Cover','Mean Runoff', 'Forest Cover','Water Table Depth', 'Kffactor (Erosion Index)', 'Topographic Wetness'))
+
+effs.df <- effs.df %>% left_join(name.changer)
+
+write_feather(effs.df, 'out/gbLinera_ALE.feather')
+effs.df <- read_feather('out/gbLinera_ALE.feather')
+
+
+alePlotter <- function(feature){
+  #ALE values shouldn't be extrapolated over limited observations, so remove the ends of our distributions.
+  perc5 = quantile(data[[feature]],.05)
+  perc95 = quantile(data[[feature]],0.95)
+  
+  
+  ## Plot data distribution
+  p1 <- ggplot(data, aes_string(x = feature)) + geom_density(adjust = 4, fill = 'grey70') +
+    xlim(perc5,perc95) + 
+    theme_classic() +
+    theme(axis.text = element_text(color = 'transparent'),
+          axis.title = element_blank(),
+          #axis.title.y = element_text(color = 'transparent'),
+          axis.ticks = element_blank(),
+          axis.line = element_line(color = 'transparent'),
+          plot.margin = margin(0,0,-1,0))
+  
+  ## Plot ALE values
+  p2 <- effs.df %>% filter(.feature == feature, .borders >= perc5, .borders <= perc95) %>%
+    ggplot(.,aes(x= .borders, y = .value)) +
+    geom_line() +
+    xlim(perc5,perc95) +
+    ylim(-1.1,1) +
+    facet_wrap(~names.New) +
+    theme_bw() +
+    theme(axis.title = element_blank(),
+          plot.margin = margin(-3,0,0,0))
+  
+  grid.arrange(p1,p2, nrow = 2, heights = c(.25,1))
+  }
+
+
+p1 <- alePlotter(features[1])  
+p2 <- alePlotter(features[2])
+p3 <- alePlotter(features[3])
+p4 <- alePlotter(features[4])
+p5 <- alePlotter(features[5])
+p6 <- alePlotter(features[6])
+p7 <- alePlotter(features[7])
+p8 <- alePlotter(features[8])
+p9 <- alePlotter(features[9])
+p10 <- alePlotter(features[10])
+p11 <- alePlotter(features[11])
+
+
+#Add feature importance plot for manuscript fig.
+p12 <- model$modelInfo$varImp(model$finalModel) %>%
+  mutate(Feature = fct_reorder(rownames(.), Overall, .desc = T)) %>%
+  arrange(Overall) %>%
+  ggplot(., aes(x = Feature, y = Overall)) + 
+  geom_col() +
+  scale_x_discrete(labels = c('Dom. Wavelength','Mean Temp','Lake Depth', 'Wetland Cover','Mean Runoff', 'Forest Cover','TPI', 'Water Table Depth', 'Blue/Green','NIR/Red','Erosion Index')) +  #For final make labels nice
+  theme_bw() +
+  labs(y = 'Importance') +
+  theme(axis.text.x = element_text(angle = 45, vjust = 1, hjust = 1),
+        axis.title.x = element_blank())
+
+g <- grid.arrange(p12, p1,p3,p5, p2,p4, p6,p7,p8,p11, p9,p10, nrow = 4, left = 'Accumulated Local Effect', bottom = 'Feature Value')
+
+
+ggsave('figures/ImpAle.png', plot = g, width = 6.5, height = 7, units = 'in', dpi = 600)
+```
+
 
 
 # Regional/Satellite specific model fit.
@@ -394,18 +514,5 @@ g <- grid.arrange(p1,p2, ncol = 2, widths = c(1,1.7), left = 'Mean Clarity (m)',
 
 ggsave('figures/CoinVFullObsShort.png', plot = g, width = 5.5, height = 7, units = 'in')
 
-
-##Fig for seminar pres
-fieldmatch.full %>% #filter(Measure == 'In.Situ') %>%
-  ggplot(., aes(x = year, y = mean, color = Measure)) + 
-  geom_line() + 
-  scale_color_viridis_d(end = .6) +
-  facet_wrap(~region, scales = 'free_y', ncol = 2) +
-  labs(title = 'Full Field and Satellite Observations') +
-  theme_bw() +
-  theme(legend.position = c(.75,.1),
-        axis.title = element_blank())
-
-ggsave('figures/Full_TS_field.png', width = 7, height = 6, units = 'in')
 ```
 
